@@ -1,0 +1,47 @@
+# One self-hosted DB4AI instance: Postgres (+pgvector), API/harness page, maintainer worker.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: db4ai
+      POSTGRES_USER: db4ai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-db4ai}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U db4ai"]
+      interval: 2s
+      retries: 30
+
+  migrate:
+    build: .
+    command: ["db4ai", "migrate"]
+    environment: &env
+      DB4AI_DATABASE_URL: postgresql://db4ai:${POSTGRES_PASSWORD:-db4ai}@postgres/db4ai
+      DB4AI_BLOB_URL: file:///data/blobs
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      DB4AI_EMBEDDER: ${DB4AI_EMBEDDER:-hash}
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    build: .
+    command: ["db4ai", "serve", "--port", "8000"]
+    environment: *env
+    volumes: [blobs:/data/blobs]
+    ports: ["8000:8000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  worker:
+    build: .
+    command: ["db4ai", "maintain"]
+    environment: *env
+    volumes: [blobs:/data/blobs]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+volumes:
+  pgdata:
+  blobs:
