@@ -71,3 +71,28 @@ with (or after) CI against `pgvector/pgvector:pg16`.
   requests. `contents: read` only; no secrets, so the offline heuristic LLM and hash embedder are used.
 - **Not verified locally:** this machine has no Docker or pgvector, so the first real run of the `vector`
   path and the smoke test is the first CI run after this push.
+
+## 2026-11-22 — vector index (part 2 of chunked embeddings)
+- **Q: How do we get fixed dims when one `vector` column holds several models?** A registry table
+  `embedding_models (model, dims)` (`004_vector_index.sql`), filled on a model's first write and checked on every
+  write and query (`ValueError` on mismatch). The column stays untyped `vector`; each model gets a **partial
+  expression index** `hnsw ((embedding::vector(dims)) vector_cosine_ops) where model = '<model>'` on both
+  `item_embeddings` and `item_chunks`. That avoids one table per model and keeps switching embedders possible.
+- **Q: Who creates the indexes?** SQL function `db4ai_ensure_vector_index(model, dims)`, called by the migration
+  for existing models and by `store.register_model` when a new model is first seen (same transaction as the first
+  embedding). No-op without pgvector and above pgvector's 2000-dim HNSW limit (exact scan for those).
+- **Q: Existing rows with mixed dims for one model?** The migration registers the most common size and deletes
+  embedding/chunk rows of other sizes (they would break the index build). They are derived data; hygiene re-queues
+  `enrich` for items with no valid embedding/chunks, so they are rebuilt. Not owner-level: nothing primary is lost.
+- **Q: HNSW plus team/type filters can miss results. How do we keep recall?** Two passes in `store._nearest`:
+  take the `DB4AI_VECTOR_CANDIDATES` (default 200, max 1000) nearest rows by `order by distance limit`
+  (an index scan, with `hnsw.ef_search` raised to match), then filter. If fewer than `limit` results survive and
+  the pool was full, rerun without the limit (exact). Results are identical to an exact scan; only speed differs.
+  pgvector 0.8 iterative scans were not used, so older pgvector versions work too.
+- **Q: Why inline the model name in the SQL?** A partial index is only usable if the planner can prove
+  `model = '<model>'`; with a bound parameter a generic (prepared) plan can't, and psycopg prepares statements
+  after 5 runs. The model is quoted with `psycopg.sql.Literal`.
+- **Q: Same queries on the `float8[]` fallback?** Yes: the distance expression is `1 - db4ai_cosine(...)`
+  instead of `<=>`, the rest of the query (and the fallback logic) is shared, so local tests exercise it.
+- **Not verified locally:** no pgvector here, so the HNSW index creation and the `EXPLAIN` test that checks the
+  index is used run for the first time in CI (`pgvector/pgvector:pg16`).

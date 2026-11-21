@@ -13,7 +13,7 @@ right priority, with a one-line reason.
       chunk. Why: one vector per 2-hour transcript can't find a paragraph.
 - [x] **CI.** A GitHub Actions workflow that runs pytest against `pgvector/pgvector:pg16`, plus a
       `docker compose` smoke test. Why: Docker and pgvector paths are untested.
-- [ ] **Vector index.** Set fixed embedding dimensions per model so pgvector can use an HNSW index (keep the
+- [x] **Vector index.** Set fixed embedding dimensions per model so pgvector can use an HNSW index (keep the
       `float8[]` fallback) on `item_chunks` and `item_embeddings`. Needs pgvector in tests, so do it with or
       after CI. Why: chunk search is a sequential scan today.
 - [ ] **One version per enrichment.** Combine summary, tags and entities into a single `enrich` action and

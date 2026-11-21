@@ -24,6 +24,9 @@ class Settings:
     voyage_model: str = field(default_factory=lambda: _env("DB4AI_VOYAGE_MODEL", "voyage-3.5"))
     # Long items are split into chunks of at most this many characters before embedding.
     chunk_chars: int = field(default_factory=lambda: int(_env("DB4AI_CHUNK_CHARS", "1500")))
+    # Vector search first takes this many nearest rows (HNSW with pgvector), then applies team/type filters;
+    # if too few results survive it falls back to an exact scan. Capped at 1000 (pgvector's ef_search limit).
+    vector_candidates: int = field(default_factory=lambda: int(_env("DB4AI_VECTOR_CANDIDATES", "200")))
     # Maintainer thresholds
     link_threshold: float = field(default_factory=lambda: float(_env("DB4AI_LINK_THRESHOLD", "0.55")))
     dup_threshold: float = field(default_factory=lambda: float(_env("DB4AI_DUP_THRESHOLD", "0.92")))

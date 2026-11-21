@@ -89,6 +89,7 @@ deployment, writes an item over HTTP, runs the maintainers and searches for it. 
 | `DB4AI_MODEL` | `claude-opus-5-5` | model the maintainers use |
 | `DB4AI_EMBEDDER` | `hash` | `voyage` (needs `VOYAGE_API_KEY`) |
 | `DB4AI_CHUNK_CHARS` | `1500` | long items are split into chunks of at most this size; search returns the best chunk |
+| `DB4AI_VECTOR_CANDIDATES` | `200` | nearest rows taken from the vector index before team/type filters; too few results after filtering falls back to an exact scan |
 | `DB4AI_LINK_THRESHOLD` / `DB4AI_DUP_THRESHOLD` | `0.55` / `0.92` | similarity thresholds |
 
 ## Not in v1

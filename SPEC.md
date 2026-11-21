@@ -22,6 +22,11 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
   A whole-item vector stays in `item_embeddings` for linking and dedup.
 - Embeddings use **pgvector** when the extension is available, otherwise a `float8[]` column
   with a SQL cosine function (same API).
+- Each embedding model has **fixed dimensions**, recorded in `embedding_models` on first use; a vector of
+  another size is rejected. With pgvector every model gets a partial HNSW index (cosine) per embeddings table on
+  `embedding::vector(dims)`. Vector search takes the `DB4AI_VECTOR_CANDIDATES` nearest rows from the index, then
+  applies team, type and status filters; if fewer results than asked survive, it reruns as an exact scan, so
+  filters never hide matches. The `float8[]` fallback runs the same queries without an index.
 
 ## 3. Data model — append-only with provenance
 - Every unstructured thing is an `item` (stable id, team, type) with a chain of `item_versions`.
