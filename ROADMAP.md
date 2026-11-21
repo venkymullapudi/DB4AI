@@ -6,7 +6,7 @@ right priority, with a one-line reason.
 
 ## Now: make the core trustworthy at company scale
 
-- [ ] **Current-version pointer.** Add an `item_heads` table (item_id → current version row), maintained in
+- [x] **Current-version pointer.** Add an `item_heads` table (item_id → current version row), maintained in
       the same transaction as each new version, and use it instead of the `DISTINCT ON` scan in `items_current`.
       Why: every query scans all versions today.
 - [ ] **Chunked embeddings + vector index.** Split long items into chunks and embed each one. Set fixed

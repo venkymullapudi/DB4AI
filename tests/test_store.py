@@ -77,3 +77,44 @@ def test_write_enqueues_enrich_job_in_same_transaction(world):
     r = save(w, w.alice, team_id=w.eng, type="memory", title="t", body="b")
     job = w.conn.execute("select * from jobs where kind='enrich'").fetchone()
     assert job["payload"] == {"item_id": str(r["item_id"])}
+
+
+def test_item_heads_track_latest_version(world):
+    w = world
+    r = save(w, w.alice, team_id=w.eng, type="memory", title="t", body="v1", external_key="hk")
+    save(w, w.alice, team_id=w.eng, type="memory", title="t", body="v2", external_key="hk")
+    head = w.conn.execute("select h.version, v.body from item_heads h join item_versions v on v.id = h.version_id"
+                          " where h.item_id=%s", (r["item_id"],)).fetchone()
+    assert (head["version"], head["body"]) == (2, "v2")
+    assert store.get_item(w.conn, w.alice, r["item_id"])["version"] == 2
+    # Every item has exactly one head, and it is the max version.
+    mismatch = w.conn.execute(
+        "select count(*) n from items i left join item_heads h on h.item_id = i.id"
+        " where h.version is distinct from (select max(version) from item_versions v where v.item_id = i.id)"
+    ).fetchone()["n"]
+    assert mismatch == 0
+    plan = "\n".join(r["QUERY PLAN"] for r in w.conn.execute(
+        "explain select * from items_current where id = %s", (r["item_id"],)))
+    assert "Unique" not in plan and "Sort" not in plan
+
+
+def test_item_heads_cannot_be_rewound_or_deleted(world):
+    w = world
+    r = save(w, w.alice, team_id=w.eng, type="memory", title="t", body="v1", external_key="hg")
+    save(w, w.alice, team_id=w.eng, type="memory", title="t", body="v2", external_key="hg")
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        w.conn.execute("update item_heads set version = 1, version_id = (select id from item_versions"
+                       " where item_id=%s and version=1) where item_id=%s", (r["item_id"], r["item_id"]))
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        w.conn.execute("delete from item_heads where item_id=%s", (r["item_id"],))
+
+
+def test_rollback_leaves_no_head(world):
+    w = world
+    prov = Provenance(w.alice.id, "test")
+    n = w.conn.execute("select count(*) n from item_heads").fetchone()["n"]
+    with pytest.raises(RuntimeError):
+        with transaction(w.conn, prov):
+            store.save_item(w.conn, w.alice, prov, team_id=w.eng, type="memory", title="t", body="b")
+            raise RuntimeError("crash")
+    assert w.conn.execute("select count(*) n from item_heads").fetchone()["n"] == n

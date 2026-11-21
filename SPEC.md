@@ -22,6 +22,9 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
 ## 3. Data model — append-only with provenance
 - Every unstructured thing is an `item` (stable id, team, type) with a chain of `item_versions`.
   Versions are **never updated or deleted** (enforced by trigger). Current state = latest version.
+- `item_heads` points each item at its latest version. A trigger advances it in the same transaction as the
+  version insert; it can only move forward and can't be deleted. `items_current` reads through it, so reads
+  don't scan the version history.
 - Each version records `actor`, `source`, `reason`, and `harness_decision_id` if a human approved it.
 - Status (active / archived / merged) is part of the version, so archiving and merging are also just new versions.
 - Revert = new version that copies an earlier one.

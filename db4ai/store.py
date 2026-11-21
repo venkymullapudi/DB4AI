@@ -38,7 +38,7 @@ def _insert_version(conn: Conn, prov: Provenance, item_id: UUID, base: dict | No
                     merged_into: UUID | None = None, blob_sha256: str | None = None) -> dict:
     # Serialise writers of the same item (row lock; items itself is never updated).
     conn.execute("select id from items where id = %s for update", (item_id,))
-    row = conn.execute("select coalesce(max(version), 0) + 1 as v from item_versions where item_id = %s",
+    row = conn.execute("select coalesce((select version from item_heads where item_id = %s), 0) + 1 as v",
                        (item_id,)).fetchone()
     chash = content_hash(title, body, blob_sha256)
     ver = conn.execute(
