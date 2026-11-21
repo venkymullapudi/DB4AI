@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "loop/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.db.name }}, py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12"]
+        db:
+          - { name: pgvector, image: "pgvector/pgvector:pg16", expect_pgvector: "1" }
+          - { name: float8-fallback, image: "postgres:16", expect_pgvector: "0" }
+        include:
+          - python: "3.11"
+            db: { name: pgvector, image: "pgvector/pgvector:pg16", expect_pgvector: "1" }
+    services:
+      postgres:
+        image: ${{ matrix.db.image }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      DB4AI_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      DB4AI_EXPECT_PGVECTOR: ${{ matrix.db.expect_pgvector }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  smoke:
+    name: docker compose smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/smoke.sh

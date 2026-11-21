@@ -73,6 +73,12 @@ The tests start a throwaway Postgres cluster with your local `initdb`/`pg_ctl`, 
 `DB4AI_TEST_DATABASE_URL`. pgvector is used when installed. Otherwise embeddings fall back to `float8[]`
 with a SQL cosine function.
 
+CI (`.github/workflows/ci.yml`) runs the suite against `pgvector/pgvector:pg16` (Python 3.11 and 3.12) and
+against plain `postgres:16` for the `float8[]` fallback. `DB4AI_EXPECT_PGVECTOR=1|0` makes a test fail if the
+expected embedding backend isn't the one in use. It also runs `scripts/smoke.sh`, which builds the Docker
+deployment, writes an item over HTTP, runs the maintainers and searches for it. Run it yourself with
+`scripts/smoke.sh` (needs Docker; it removes its containers and volumes afterwards).
+
 ## Configuration
 
 | env | default | |

@@ -118,3 +118,20 @@ def test_rollback_leaves_no_head(world):
             store.save_item(w.conn, w.alice, prov, team_id=w.eng, type="memory", title="t", body="b")
             raise RuntimeError("crash")
     assert w.conn.execute("select count(*) n from item_heads").fetchone()["n"] == n
+
+
+def test_embedding_storage_matches_expected_backend(conn):
+    """CI sets DB4AI_EXPECT_PGVECTOR so a missing pgvector can't silently fall back to float8[]."""
+    import os
+
+    from db4ai.db import vector_enabled
+
+    expected = os.environ.get("DB4AI_EXPECT_PGVECTOR")
+    if expected is None:
+        pytest.skip("DB4AI_EXPECT_PGVECTOR not set")
+    assert vector_enabled(conn) is (expected == "1")
+    t = conn.execute(
+        "select format_type(atttypid, atttypmod) as t from pg_attribute"
+        " where attrelid = 'item_chunks'::regclass and attname = 'embedding'"
+    ).fetchone()["t"]
+    assert t.startswith("vector") if expected == "1" else t == "double precision[]"

@@ -50,3 +50,24 @@ with (or after) CI against `pgvector/pgvector:pg16`.
 - **Q: Batch limits?** `VoyageEmbedder.embed` now sends at most 128 inputs per request (Voyage's limit).
 - **Q: Roadmap order?** CI moves up to right after this item, because the vector index (part 2) needs
   pgvector in tests and CI is where it gets that.
+
+## 2026-11-22 — CI
+- **Q: Which databases?** Two jobs from one matrix: `pgvector/pgvector:pg16` (the image `docker-compose.yml`
+  ships) and plain `postgres:16`, so both embedding backends (`vector` and the `float8[]` fallback) stay tested.
+  The local test cluster usually has no pgvector, so CI is the only place the `vector` path runs.
+- **Q: How do tests reach the service Postgres?** The existing `DB4AI_TEST_DATABASE_URL` hook in
+  `tests/conftest.py` (template database + one clone per test). No conftest changes needed.
+- **Q: How do we know pgvector was really used?** New `DB4AI_EXPECT_PGVECTOR=1|0`; a test asserts the
+  `item_embeddings`/`item_chunks` column types match. Unset (local runs) it skips. Without it a broken
+  pgvector install would silently fall back and CI would still be green.
+- **Q: Python versions?** 3.12 (the Dockerfile's) on both databases, plus 3.11 (the `requires-python` floor)
+  on pgvector. Newer versions can be added when the Dockerfile moves.
+- **Q: What does the smoke test cover?** `scripts/smoke.sh`: `docker compose up --build` of api + worker
+  (migrate runs first), wait for `/healthz`, check the chunk column is `vector`, create an admin user via the
+  CLI, `POST /items`, `GET /items/{id}`, `db4ai maintain --once`, then `/search` must return the item with a
+  chunk (retried up to 30s because the worker races the one-shot run). Uses a separate compose project name
+  and `down -v` on exit, so it never touches a developer's real `db4ai` volumes. Prints logs on failure.
+- **Q: Triggers?** Push to `main` and `loop/**` (so loop failure branches get a CI result too) and pull
+  requests. `contents: read` only; no secrets, so the offline heuristic LLM and hash embedder are used.
+- **Not verified locally:** this machine has no Docker or pgvector, so the first real run of the `vector`
+  path and the smoke test is the first CI run after this push.
