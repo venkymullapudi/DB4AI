@@ -200,6 +200,38 @@ def put_embedding(conn: Conn, item_id: UUID, model: str, version: int, vec: list
     )
 
 
+def put_chunks(conn: Conn, item_id: UUID, model: str, version: int, chash: str,
+               spans: list[tuple[int, int]], vecs: list[list[float]]) -> None:
+    """Replace an item's chunks for `model` (derived data, so replacing is allowed)."""
+    conn.execute("delete from item_chunks where item_id = %s and model = %s", (item_id, model))
+    for no, ((start, end), vec) in enumerate(zip(spans, vecs)):
+        ph, val = _vec_param(conn, vec)
+        conn.execute(
+            "insert into item_chunks (item_id, model, chunk_no, version, content_hash, start_char, end_char, embedding)"
+            f" values (%s, %s, %s, %s, %s, %s, %s, {ph})",
+            (item_id, model, no, version, chash, start, end, val),
+        )
+
+
+def similar_chunks(conn: Conn, vec: list[float], model: str, *, team_ids: list[UUID] | None,
+                   limit: int = 10, types: list[str] | None = None) -> list[dict]:
+    """Best-matching chunk per item, for chunks cut from the item's current content."""
+    ph, val = _vec_param(conn, vec)
+    sim = f"1 - (k.embedding <=> {ph})" if vector_enabled(conn) else f"db4ai_cosine(k.embedding, {ph})"
+    return conn.execute(
+        "select * from ("
+        f" select distinct on (c.id) c.id, c.title, c.type, c.team_id, c.status, c.updated_at, {sim} as score,"
+        " k.chunk_no, k.start_char, k.end_char,"
+        " substr(c.body, k.start_char + 1, k.end_char - k.start_char) as chunk_text"
+        " from item_chunks k join items_current c on c.id = k.item_id and c.content_hash = k.content_hash"
+        " where k.model = %s and c.status = 'active'"
+        " and (%s::uuid[] is null or c.team_id = any(%s::uuid[]))"
+        " and (%s::text[] is null or c.type = any(%s::text[]))"
+        " order by c.id, score desc) best order by score desc limit %s",
+        (val, model, team_ids, team_ids, types, types, limit),
+    ).fetchall()
+
+
 def similar(conn: Conn, vec: list[float], model: str, *, team_ids: list[UUID] | None,
             exclude: UUID | None = None, limit: int = 10, types: list[str] | None = None) -> list[dict]:
     ph, val = _vec_param(conn, vec)
@@ -218,7 +250,11 @@ def similar(conn: Conn, vec: list[float], model: str, *, team_ids: list[UUID] | 
 
 def search(conn: Conn, actor: Actor, query: str, *, embedder=None, limit: int = 10,
            types: list[str] | None = None, include_inactive: bool = False) -> list[dict]:
-    """Hybrid search: full-text rank + embedding similarity, restricted to the actor's teams."""
+    """Hybrid search: full-text rank + chunk embedding similarity, restricted to the actor's teams.
+
+    Each result carries `chunk` (no, start, end, text): the item's best-matching chunk by vector score, or
+    None if the item was found only by full-text search.
+    """
     teams = None if actor.is_admin else list(actor.teams)
     fts = conn.execute(
         "select c.id, c.title, c.type, c.team_id, c.status, c.updated_at,"
@@ -233,12 +269,14 @@ def search(conn: Conn, actor: Actor, query: str, *, embedder=None, limit: int = 
     ).fetchall()
     results: dict[UUID, dict] = {}
     for r in fts:
-        results[r["id"]] = {**r, "fts": float(r["score"]), "vec": 0.0}
+        results[r["id"]] = {**r, "fts": float(r["score"]), "vec": 0.0, "chunk": None}
     if embedder is not None:
         vec = embedder.embed([query])[0]
-        for r in similar(conn, vec, embedder.name, team_ids=teams, limit=limit * 2, types=types):
+        for r in similar_chunks(conn, vec, embedder.name, team_ids=teams, limit=limit * 2, types=types):
+            chunk = {"no": r.pop("chunk_no"), "start": r.pop("start_char"), "end": r.pop("end_char"),
+                     "text": r.pop("chunk_text")}
             entry = results.setdefault(r["id"], {**r, "fts": 0.0, "vec": 0.0})
-            entry["vec"] = float(r["score"])
+            entry["vec"], entry["chunk"] = float(r["score"]), chunk
     ranked = sorted(results.values(), key=lambda r: min(r["fts"], 1.0) * 0.5 + r["vec"], reverse=True)
     for r in ranked:
         r["score"] = round(min(r["fts"], 1.0) * 0.5 + r["vec"], 4)

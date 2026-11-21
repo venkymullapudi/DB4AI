@@ -16,6 +16,10 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
   A failed commit leaves an orphan blob, which the hygiene job collects. A row never points at a missing blob.
 - Any other store added later (search engine, OLAP copy) is a **derived copy fed by the outbox**
   (the `jobs` table) and must be rebuildable from Postgres.
+- Long items are split into **chunks** (paragraphs packed up to `DB4AI_CHUNK_CHARS`) and each chunk is
+  embedded in `item_chunks`. Chunks store offsets into the body plus the `content_hash` they were cut from,
+  not a copy of the text; search ignores chunks from old content and returns each item's best chunk.
+  A whole-item vector stays in `item_embeddings` for linking and dedup.
 - Embeddings use **pgvector** when the extension is available, otherwise a `float8[]` column
   with a SQL cosine function (same API).
 

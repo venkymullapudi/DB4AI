@@ -9,9 +9,13 @@ right priority, with a one-line reason.
 - [x] **Current-version pointer.** Add an `item_heads` table (item_id → current version row), maintained in
       the same transaction as each new version, and use it instead of the `DISTINCT ON` scan in `items_current`.
       Why: every query scans all versions today.
-- [ ] **Chunked embeddings + vector index.** Split long items into chunks and embed each one. Set fixed
-      embedding dimensions per model so pgvector can use an HNSW index (keep the `float8[]` fallback).
-      Search returns the matching chunk. Why: one vector per 2-hour transcript can't find a paragraph.
+- [x] **Chunked embeddings.** Split long items into chunks and embed each one; search returns the matching
+      chunk. Why: one vector per 2-hour transcript can't find a paragraph.
+- [ ] **CI.** A GitHub Actions workflow that runs pytest against `pgvector/pgvector:pg16`, plus a
+      `docker compose` smoke test. Why: Docker and pgvector paths are untested.
+- [ ] **Vector index.** Set fixed embedding dimensions per model so pgvector can use an HNSW index (keep the
+      `float8[]` fallback) on `item_chunks` and `item_embeddings`. Needs pgvector in tests, so do it with or
+      after CI. Why: chunk search is a sequential scan today.
 - [ ] **One version per enrichment.** Combine summary, tags and entities into a single `enrich` action and
       version. Why: each enrichment adds 3 versions today.
 - [ ] **Redaction and erasure via the AIDBHarness.** Always `ask_first` and admin-approved. Scrub the content
@@ -19,8 +23,6 @@ right priority, with a one-line reason.
       This is the only sanctioned bypass of the append-only triggers. Why: GDPR and legal erasure requests.
 - [ ] **`ask` tool.** Claude asks a question and gets an answer grounded in DB4AI items, citing item ids and
       versions (MCP + HTTP). Why: storing and searching isn't answering.
-- [ ] **CI.** A GitHub Actions workflow that runs pytest against `pgvector/pgvector:pg16`, plus a
-      `docker compose` smoke test. Why: Docker and pgvector paths are untested.
 
 ## Next: get real data flowing in
 

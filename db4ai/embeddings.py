@@ -54,10 +54,55 @@ class VoyageEmbedder:
         self._http = httpx.Client(timeout=60, headers={"Authorization": f"Bearer {os.environ['VOYAGE_API_KEY']}"})
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        r = self._http.post("https://api.voyageai.com/v1/embeddings",
-                            json={"input": [t[:32000] for t in texts], "model": self.model})
-        r.raise_for_status()
-        return [d["embedding"] for d in r.json()["data"]]
+        out: list[list[float]] = []
+        for i in range(0, len(texts), 128):  # Voyage accepts at most 128 inputs per request
+            r = self._http.post("https://api.voyageai.com/v1/embeddings",
+                                json={"input": [t[:32000] for t in texts[i:i + 128]], "model": self.model})
+            r.raise_for_status()
+            out.extend(d["embedding"] for d in sorted(r.json()["data"], key=lambda d: d["index"]))
+        return out
+
+
+_PARA_BREAK = re.compile(r"\n[ \t]*\n")
+
+
+def _strip_span(text: str, a: int, b: int) -> tuple[int, int]:
+    while a < b and text[a].isspace():
+        a += 1
+    while b > a and text[b - 1].isspace():
+        b -= 1
+    return a, b
+
+
+def chunk_spans(text: str, max_chars: int = 1500) -> list[tuple[int, int]]:
+    """Split `text` into (start, end) character spans of at most `max_chars`.
+
+    Paragraphs (blank-line separated) are packed greedily; a paragraph longer than `max_chars` is cut at the
+    last whitespace before the limit (or hard at the limit if there is none). Empty text gives one empty span.
+    """
+    max_chars = max(1, max_chars)
+    pieces: list[tuple[int, int]] = []
+    pos = 0
+    for m in [*_PARA_BREAK.finditer(text), None]:
+        a, b = _strip_span(text, pos, m.start() if m else len(text))
+        pos = m.end() if m else len(text)
+        while b - a > max_chars:
+            cut = a + max_chars
+            ws = max(text.rfind(" ", a + 1, cut + 1), text.rfind("\n", a + 1, cut + 1))
+            cut = ws if ws > a else cut
+            pieces.append(_strip_span(text, a, cut))
+            a, b = _strip_span(text, cut, b)
+        if b > a:
+            pieces.append((a, b))
+    if not pieces:
+        return [(0, 0)]
+    spans = [pieces[0]]
+    for a, b in pieces[1:]:
+        if b - spans[-1][0] <= max_chars:
+            spans[-1] = (spans[-1][0], b)
+        else:
+            spans.append((a, b))
+    return spans
 
 
 def get_embedder() -> Embedder:

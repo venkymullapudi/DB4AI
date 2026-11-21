@@ -17,7 +17,7 @@ from .auth import Actor, maintainer_agent
 from .blobs import BlobStore, gc_orphans
 from .config import settings
 from .db import Conn
-from .embeddings import Embedder
+from .embeddings import Embedder, chunk_spans
 
 log = logging.getLogger(__name__)
 Commit = Callable[[Conn], dict]
@@ -47,7 +47,10 @@ def enrich(ctx: Context, payload: dict) -> Commit | None:
     if cur is None or cur["status"] != "active":
         return None
     result = ctx.llm.enrich(cur["title"], cur["body"])
-    vec = ctx.embedder.embed([f"{cur['title']}\n{cur['body']}"])[0]
+    body = cur["body"]
+    spans = chunk_spans(body, ctx.settings.chunk_chars)
+    vecs = ctx.embedder.embed([f"{cur['title']}\n{body}"] + [f"{cur['title']}\n{body[a:b]}" for a, b in spans])
+    vec, chunk_vecs = vecs[0], vecs[1:]
 
     def commit(conn: Conn) -> dict:
         agent = ctx.agent
@@ -59,6 +62,7 @@ def enrich(ctx: Context, payload: dict) -> Commit | None:
                 harness.propose(conn, agent, action, {"item_id": str(item_id), "value": value,
                                                       "for_version": cur["version"]}, reason=why, confidence=1.0)
         store.put_embedding(conn, item_id, ctx.embedder.name, latest, vec)
+        store.put_chunks(conn, item_id, ctx.embedder.name, cur["version"], cur["content_hash"], spans, chunk_vecs)
         store.enqueue(conn, "relate", {"item_id": str(item_id)}, dedupe_key=f"relate:{item_id}")
         return {"tags": result.tags, "entities": result.entities}
 
@@ -175,8 +179,10 @@ def schema_scan(ctx: Context, payload: dict) -> Commit | None:
 def hygiene(ctx: Context, payload: dict) -> Commit | None:
     removed = gc_orphans(ctx.conn, ctx.blobs) if ctx.blobs is not None else []
     missing = ctx.conn.execute(
-        "select c.id from items_current c left join item_embeddings e on e.item_id=c.id and e.model=%s"
-        " where c.status='active' and (e.item_id is null) limit 500", (ctx.embedder.name,)).fetchall()
+        "select c.id from items_current c left join item_embeddings e on e.item_id=c.id and e.model=%(m)s"
+        " where c.status='active' and (e.item_id is null or not exists ("
+        "   select 1 from item_chunks k where k.item_id=c.id and k.model=%(m)s and k.content_hash=c.content_hash))"
+        " limit 500", {"m": ctx.embedder.name}).fetchall()
 
     def commit(conn: Conn) -> dict:
         expired = harness.expire_pending(conn)
