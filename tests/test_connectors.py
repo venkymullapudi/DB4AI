@@ -145,3 +145,99 @@ def test_cli_sync(db_url, monkeypatch, tmp_path, capsys):
     main(["sync", "transcripts", str(tmp_path / "rec"), "--team", "eng", "--as", "dana"])
     out = json.loads(capsys.readouterr().out)
     assert out["saved"] == 1 and out["changed"] == 1 and out["source"] == "transcripts"
+
+
+def _pending_archives(w):
+    return w.conn.execute("select id, payload, status, proposed_by from harness_decisions"
+                          " where action_type='archive_item' order by proposed_at").fetchall()
+
+
+def test_source_deletion_proposes_archive_then_approve(world):
+    w = world
+    recs = [Record("a", "document", "A", "alpha text"), Record("b", "document", "B", "beta text")]
+    r = connectors.apply_batch(w.conn, w.bob, "drive", w.eng, recs, "p1", None)
+    a_id = r["items"][0]["item_id"]
+    d = connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [], "p2", "p1", deleted=["a", "nope"])
+    assert d["deleted"] == 1 and d["deletions"][0]["status"] == "pending"
+    # ask_first by default: nothing is archived yet; the proposal holds the item id only.
+    assert store.get_item(w.conn, w.alice, a_id)["status"] == "active"
+    [dec] = _pending_archives(w)
+    assert dec["payload"] == {"item_id": str(a_id), "for_version": 1, "source_deleted": "drive"}
+    assert dec["proposed_by"] == w.bob.id
+    # Re-sending the deletion is idempotent.
+    again = connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [], "p3", "p2", deleted=["a"])
+    assert again["deletions"][0]["decision_id"] == dec["id"] and len(_pending_archives(w)) == 1
+    log = w.conn.execute("select after from change_log where entity='sync_cursor' order by id").fetchall()
+    assert log[-1]["after"] == {"cursor": "p3", "records": 0, "deleted": 1}
+    harness.decide(w.conn, w.alice, dec["id"], True)
+    assert store.get_item(w.conn, w.alice, a_id)["status"] == "archived"
+    # Archived (or unknown) keys get no new proposal; the file coming back doesn't revive it.
+    connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [], "p4", "p3", deleted=["a"])
+    assert len(_pending_archives(w)) == 1
+    connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [recs[0]], "p5", "p4")
+    assert store.get_item(w.conn, w.alice, a_id)["status"] == "archived"
+    with pytest.raises(ValueError):
+        connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [recs[1]], "p6", "p5", deleted=["b"])
+    with pytest.raises(ValueError):
+        connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [], "p6", "p5", deleted=[str(i) for i in range(501)])
+
+
+def test_restored_record_withdraws_pending_deletion(world):
+    w = world
+    rec = Record("a", "document", "A", "alpha text")
+    r = connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [rec], "p1", None)
+    connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [], "p2", "p1", deleted=["a"])
+    connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [rec], "p3", "p2")
+    [dec] = _pending_archives(w)
+    assert dec["status"] == "expired"
+    with pytest.raises(harness.HarnessError):
+        harness.decide(w.conn, w.alice, dec["id"], True)
+    assert store.get_item(w.conn, w.alice, r["items"][0]["item_id"])["status"] == "active"
+    # Deleted again later: a fresh proposal (the withdrawn one doesn't block it).
+    d = connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [], "p4", "p3", deleted=["a"])
+    assert d["deleted"] == 1 and d["deletions"][0]["status"] == "pending"
+
+
+def test_rejected_deletion_is_not_reproposed(world):
+    w = world
+    connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [Record("a", "document", "A", "x")], "p1", None)
+    d = connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [], "p2", "p1", deleted=["a"])
+    harness.decide(w.conn, w.alice, d["deletions"][0]["decision_id"], False)
+    again = connectors.apply_batch(w.conn, w.bob, "drive", w.eng, [], "p3", "p2", deleted=["a"])
+    assert again["deletions"][0]["status"] == "rejected" and len(_pending_archives(w)) == 1
+
+
+def test_folder_deletions_fail_closed(world, tmp_path):
+    w = world
+    root = tmp_path / "rec"
+    root.mkdir()
+    (root / "a.vtt").write_text(VTT)
+    (root / "b.srt").write_text(SRT)
+    connectors.run(w.conn, w.bob, "transcripts", w.eng, TranscriptFolder(root))
+    (root / "a.vtt").unlink()
+    r = connectors.run(w.conn, w.bob, "transcripts", w.eng, TranscriptFolder(root))
+    assert r["deleted"] == 1
+    [dec] = _pending_archives(w)
+    a = w.conn.execute("select id from items where external_key='transcripts:a.vtt'").fetchone()["id"]
+    assert dec["payload"]["item_id"] == str(a)
+    # Pending already: an idle run writes nothing more.
+    n = w.conn.execute("select count(*) n from change_log").fetchone()["n"]
+    idle = connectors.run(w.conn, w.bob, "transcripts", w.eng, TranscriptFolder(root))
+    assert idle["deleted"] == 0
+    assert w.conn.execute("select count(*) n from change_log").fetchone()["n"] == n + 1  # b.srt re-sent, no version
+    # An emptied (unmounted?) folder proposes nothing; a missing one is an error.
+    (root / "b.srt").unlink()
+    assert connectors.run(w.conn, w.bob, "transcripts", w.eng, TranscriptFolder(root))["deleted"] == 0
+    with pytest.raises(FileNotFoundError):
+        connectors.run(w.conn, w.bob, "transcripts", w.eng, TranscriptFolder(tmp_path / "gone"))
+
+
+def test_http_sync_deleted(world, db_url):
+    w = world
+    h = {"Authorization": f"Bearer {w.tokens['bob']}"}
+    with TestClient(create_app(db_url)) as client:
+        body = {"items": [{"key": "f1", "type": "document", "title": "Roadmap", "body": "Q3 goals"}], "cursor": "t1"}
+        assert client.post("/sync/drive", json=body, headers=h).status_code == 200
+        r = client.post("/sync/drive", json={"deleted": ["f1"], "cursor": "t2", "expected_cursor": "t1"}, headers=h)
+        assert r.status_code == 200 and r.json()["deleted"] == 1
+        assert r.json()["deletions"][0]["status"] == "pending"

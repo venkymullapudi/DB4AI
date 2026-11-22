@@ -60,6 +60,7 @@ class SyncItemIn(BaseModel):
 class SyncIn(BaseModel):
     team: str | None = None
     items: list[SyncItemIn] = []
+    deleted: list[str] = []
     cursor: str | None = None
     expected_cursor: str | None = None
 
@@ -159,7 +160,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.post("/sync/{source}")
     def post_sync(source: str, body: SyncIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
         return service.sync_batch(c, a, source, items=[i.model_dump() for i in body.items], cursor=body.cursor,
-                                  expected_cursor=body.expected_cursor, team=body.team)
+                                  expected_cursor=body.expected_cursor, team=body.team, deleted=body.deleted)
 
     @app.get("/search")
     def get_search(q: str, type: str | None = None, limit: int = 10, a: Actor = Depends(actor), c: Conn = Depends(conn)):

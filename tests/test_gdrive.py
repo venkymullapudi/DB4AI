@@ -121,6 +121,18 @@ def test_initial_listing_then_incremental_changes(world):
     assert (r["batches"], r["saved"], r["changed"], r["cursor"]) == (2, 2, 2, "changes:9")
     assert store.get_item(w.conn, w.alice, hit["id"])["version"] == 2
     assert [x["external_key"] for x in eng_docs(w)] == ["gdrive:d1", "gdrive:d2", "gdrive:d3", "gdrive:t1"]
+    # The removed doc gets an ask_first archive proposal; the trashed one was never synced, so nothing to do.
+    assert r["deleted"] == 1
+    d2 = w.conn.execute("select id from items where external_key='gdrive:d2'").fetchone()["id"]
+    [dec] = w.conn.execute("select payload, status from harness_decisions where action_type='archive_item'").fetchall()
+    assert dec["payload"]["item_id"] == str(d2) and dec["status"] == "pending"
+    assert store.get_item(w.conn, w.alice, d2)["status"] == "active"
+
+    # Trashing a synced doc is a deletion too.
+    fake.files["t1"]["trashed"] = True
+    fake.change_log.append({"fileId": "t1", "removed": False, "file": dict(fake.files["t1"])})
+    r = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))
+    assert (r["batches"], r["saved"], r["deleted"]) == (1, 0, 1)
 
 
 def test_resume_mid_listing_and_errors(world):

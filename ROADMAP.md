@@ -35,7 +35,7 @@ right priority, with a one-line reason.
       meeting transcripts from a folder (.vtt/.srt/.txt).
 - [x] **Google Drive/Docs connector** on the connector framework (Drive changes API page token as the cursor,
       Docs exported as text, OAuth token supplied by the owner via env). Why: split from the connector item.
-- [ ] **Source deletions in connectors.** A record the source deleted proposes `archive_item` (ask_first) instead of
+- [x] **Source deletions in connectors.** A record the source deleted proposes `archive_item` (ask_first) instead of
       being ignored. Why: v1 sync only upserts, so deleted Drive files would live on.
 - [ ] **Drive folder scoping and more file types.** Limit `gdrive` to chosen folders/shared drives, and sync PDFs,
       .docx and Sheets (as CSV → structured datasets). Why: v1 syncs every Doc/text file the token can read.

@@ -287,3 +287,34 @@ with (or after) CI against `pgvector/pgvector:pg16`.
 - **Q: Tests?** A fake Drive behind `httpx.MockTransport` (paged list and changes, export, media, token refresh); no
   network or Google account.
 - **Not owner-level:** no new account or paid service; the owner opts in by supplying their own token. No migration.
+
+
+## 2026-11-23 — source deletions in connectors
+- **Q: How does a connector report a deletion?** `Batch.deleted`: a list of source keys next to `records`, saved in the
+  same transaction as the batch and its cursor move (so a crash can't lose a deletion or replay a half). Over HTTP,
+  `POST /sync/{source}` takes `deleted: [key, ...]`. Records plus deletions count toward the 500-per-batch limit.
+- **Q: What happens to a deleted record's item?** The batch proposes `archive_item` through the harness (source
+  `connector:<source>`, payload `{item_id, for_version, source_deleted: <source>}`). The tier comes from `policies`, so
+  it is `ask_first` by default and fails closed; nothing is archived until a human approves. A team that trusts its
+  source can set the policy to `auto_notice` itself. Never erase: deleting a file in Drive isn't an erasure request.
+- **Q: Which items get a proposal?** Only an item with that external key in the batch's team whose current status is
+  active or stale. Unknown keys, and archived, merged or erased items, are ignored. Re-sending a deletion is
+  idempotent: the fingerprint finds the pending (or rejected) decision and makes no new one, so a rejected deletion
+  ("keep it anyway") is never proposed again.
+- **Q: What goes in the proposal?** Item id only, plus a reason "deleted in <source>". Not the source key or title:
+  a key can be a file path, and harness rows shouldn't add erasure scope. The diff (title, status) is computed by the
+  existing `archive_item` action as for any other proposal.
+- **Q: The file comes back before anyone decides?** Saving a record for an item withdraws its pending
+  source-deletion proposals from that source (status `expired`, note "withdrawn: back in <source>", change_log row),
+  so approving later can't archive a live file. If the archive was already approved, the item stays archived
+  (re-imports never revive lifecycle state, as before); a human can revert the decision.
+- **Q: Drive?** A change with `removed: true` (deleted, or the account lost access) or a file now `trashed` becomes a
+  deletion. Both mean DB4AI can no longer read it from the source, and a human decides either way. The first full
+  listing reports no deletions.
+- **Q: Transcripts folder?** Its mtime cursor can't see deletions, so connectors may offer `deleted(known_keys)`, a
+  full-listing check that `connectors.run` calls after the batches. `known_keys` = the source's live items in the
+  team, minus those with a pending or rejected source-deletion proposal (so an idle run writes nothing). Fail closed:
+  a missing folder is an error, and a folder with no transcripts at all reports no deletions (an unmounted share
+  would otherwise propose archiving everything).
+- **Not owner-level:** no data is deleted or migrated (archiving is a reversible new version behind approval), no
+  external service, no migration.

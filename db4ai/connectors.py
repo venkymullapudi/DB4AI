@@ -12,14 +12,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+import logging
 from typing import Iterator, Protocol
 from uuid import UUID
 
-from . import store
+from . import harness, store
 from .auth import Actor
 from .db import Conn, Provenance, log_change, transaction
 
+log = logging.getLogger(__name__)
+
 MAX_BATCH = 500
+LIVE = ("active", "stale")  # statuses a source deletion proposes to archive
 SOURCE_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
@@ -40,10 +44,15 @@ class Record:
 class Batch:
     records: list[Record]
     cursor: str | None       # where the source is once these records are saved
+    deleted: list[str] = field(default_factory=list)  # keys the source deleted → propose archive_item
 
 
 class Connector(Protocol):
     def fetch(self, cursor: str | None) -> Iterator[Batch]: ...
+
+    # Optional, for sources whose cursor can't see deletions (e.g. a folder): given the keys DB4AI holds as live,
+    # return those the source no longer has. Called by `run` after the batches.
+    # def deleted(self, known: set[str]) -> list[str]: ...
 
 
 def _check_source(source: str) -> str:
@@ -61,18 +70,47 @@ def get_cursor(conn: Conn, actor: Actor, source: str, team_id: UUID) -> dict:
             "updated_at": row["updated_at"] if row else None}
 
 
+def _withdraw_deletions(conn: Conn, prov: Provenance, source: str, item_id: UUID) -> None:
+    """The record is back in the source: a pending proposal to archive it as deleted must not be approved later."""
+    rows = conn.execute(
+        "update harness_decisions set status='expired', decision_note=%s"
+        " where status='pending' and action_type='archive_item' and payload->>'item_id'=%s"
+        " and payload->>'source_deleted'=%s returning id",
+        (f"withdrawn: back in {source}", str(item_id), source)).fetchall()
+    for r in rows:
+        log_change(conn, prov, "harness", str(r["id"]), "withdraw", after={"reason": f"back in {source}"})
+
+
+def _propose_deletion(conn: Conn, actor: Actor, source: str, team_id: UUID, key: str) -> dict | None:
+    cur = conn.execute("select id, version, status from items_current where team_id=%s and external_key=%s",
+                       (team_id, f"{source}:{key}")).fetchall()
+    out = None
+    for row in cur:  # external_key is unique per (team, type); a key could exist under more than one type
+        if row["status"] not in LIVE:
+            continue
+        d = harness.propose(conn, actor, "archive_item",
+                            {"item_id": str(row["id"]), "for_version": row["version"], "source_deleted": source},
+                            reason=f"deleted in {source}", source=f"connector:{source}")
+        out = {"key": key, "item_id": row["id"], "decision_id": d["decision_id"], "status": d["status"]}
+    return out
+
+
 def apply_batch(conn: Conn, actor: Actor, source: str, team_id: UUID, records: list[Record], cursor: str | None,
-                expected_cursor: str | None) -> dict:
-    """Save `records` and move the cursor from `expected_cursor` to `cursor`, in one transaction."""
+                expected_cursor: str | None, deleted: list[str] | None = None) -> dict:
+    """Save `records`, propose archiving the `deleted` keys' items, and move the cursor from `expected_cursor` to
+    `cursor`, in one transaction."""
     _check_source(source)
     actor.require_write(team_id)
-    if len(records) > MAX_BATCH:
+    deleted = list(dict.fromkeys(deleted or []))
+    if len(records) + len(deleted) > MAX_BATCH:
         raise ValueError(f"at most {MAX_BATCH} records per batch")
     keys = [r.key for r in records]
-    if any(not k for k in keys):
+    if any(not k for k in keys + deleted):
         raise ValueError("every record needs a key")
+    if set(keys) & set(deleted):
+        raise ValueError("a key can't be both saved and deleted in one batch")
     prov = Provenance(actor.id, f"connector:{source}", f"sync {source}")
-    out = {"source": source, "saved": 0, "changed": 0, "erased": 0, "items": []}
+    out = {"source": source, "saved": 0, "changed": 0, "erased": 0, "deleted": 0, "items": [], "deletions": []}
     with transaction(conn, prov):
         conn.execute("insert into sync_cursors (source, team_id) values (%s,%s) on conflict do nothing",
                      (source, team_id))
@@ -88,11 +126,19 @@ def apply_batch(conn: Conn, actor: Actor, source: str, team_id: UUID, records: l
             out["erased"] += bool(r.get("erased"))
             out["items"].append({"key": rec.key, "item_id": r["item_id"], "version": r["version"],
                                  "changed": r["changed"]})
+            if not r.get("erased"):
+                _withdraw_deletions(conn, prov, source, r["item_id"])
+        for key in deleted:
+            d = _propose_deletion(conn, actor, source, team_id, key)
+            if d is not None:
+                out["deleted"] += 1
+                out["deletions"].append(d)
         conn.execute("update sync_cursors set cursor=%s, batches=batches+1, records=records+%s, updated_at=now(),"
                      " updated_by=%s where source=%s and team_id=%s",
                      (cursor, len(records), actor.id, source, team_id))
         log_change(conn, prov, "sync_cursor", f"{source}/{team_id}", "advance",
-                   before={"cursor": expected_cursor}, after={"cursor": cursor, "records": len(records)})
+                   before={"cursor": expected_cursor},
+                   after={"cursor": cursor, "records": len(records), "deleted": len(deleted)})
     out["cursor"] = cursor
     return out
 
@@ -100,15 +146,37 @@ def apply_batch(conn: Conn, actor: Actor, source: str, team_id: UUID, records: l
 def run(conn: Conn, actor: Actor, source: str, team_id: UUID, connector: Connector) -> dict:
     """Pull every batch after the stored cursor and apply them in order."""
     cursor = get_cursor(conn, actor, source, team_id)["cursor"]
-    total = {"source": source, "batches": 0, "saved": 0, "changed": 0, "erased": 0, "cursor": cursor}
-    for batch in connector.fetch(cursor):
-        r = apply_batch(conn, actor, source, team_id, batch.records, batch.cursor, cursor)
-        cursor = batch.cursor
+    total = {"source": source, "batches": 0, "saved": 0, "changed": 0, "erased": 0, "deleted": 0, "cursor": cursor}
+
+    def add(r):
         total["batches"] += 1
-        for k in ("saved", "changed", "erased"):
+        for k in ("saved", "changed", "erased", "deleted"):
             total[k] += r[k]
+
+    for batch in connector.fetch(cursor):
+        add(apply_batch(conn, actor, source, team_id, batch.records, batch.cursor, cursor, batch.deleted))
+        cursor = batch.cursor
         total["cursor"] = cursor
+    if hasattr(connector, "deleted"):
+        gone = connector.deleted(live_keys(conn, actor, source, team_id))
+        for i in range(0, len(gone), MAX_BATCH):
+            add(apply_batch(conn, actor, source, team_id, [], cursor, cursor, gone[i:i + MAX_BATCH]))
     return total
+
+
+def live_keys(conn: Conn, actor: Actor, source: str, team_id: UUID) -> set[str]:
+    """Source keys of the team's live items from `source`, minus those whose deletion is already pending or was
+    rejected (so a full-listing deletion check that finds nothing new writes nothing)."""
+    actor.require_write(team_id)
+    prefix = f"{_check_source(source)}:"
+    rows = conn.execute(
+        "select substr(c.external_key, %s) as key from items_current c"
+        " where c.team_id=%s and left(c.external_key, %s)=%s and c.status = any(%s)"
+        " and not exists (select 1 from harness_decisions d where d.action_type='archive_item'"
+        "   and d.payload->>'item_id' = c.id::text and d.payload->>'source_deleted'=%s"
+        "   and d.status in ('pending','rejected'))",
+        (len(prefix) + 1, team_id, len(prefix), prefix, list(LIVE), source)).fetchall()
+    return {r["key"] for r in rows}
 
 
 # ---------------------------------------------------------------- meeting transcripts (local folder)
@@ -192,7 +260,22 @@ class TranscriptFolder:
                     found.append((m, p))
         return sorted(found, key=lambda x: (x[0], str(x[1])))
 
+    def _check_root(self) -> None:
+        if not self.root.is_dir():  # fail closed: an unmounted share must not look like "everything deleted"
+            raise FileNotFoundError(f"transcripts folder not found: {self.root}")
+
+    def deleted(self, known: set[str]) -> list[str]:
+        """Keys DB4AI holds that are no longer in the folder. An empty folder reports nothing (fail closed)."""
+        self._check_root()
+        present = {p.relative_to(self.root).as_posix() for _m, p in self._files(0)}
+        if not present:
+            if known:
+                log.warning("transcripts folder %s is empty; not proposing %d deletions", self.root, len(known))
+            return []
+        return sorted(known - present)
+
     def fetch(self, cursor: str | None) -> Iterator[Batch]:
+        self._check_root()
         files = self._files(int(cursor) if cursor else 0)
         for i in range(0, len(files), self.batch_size):
             chunk = files[i:i + self.batch_size]

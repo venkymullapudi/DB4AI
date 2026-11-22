@@ -37,10 +37,12 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
 - **Connectors with incremental sync.** `db4ai sync transcripts <folder> --team eng` turns meeting transcripts
   (`.vtt`, `.srt`, `.txt`, e.g. a Zoom/Meet/Teams export folder) into `meeting` items with speakers and duration,
   and only reads files newer than its cursor on the next run. Connectors that run elsewhere push batches to
-  `POST /sync/{source}` (`items`, `cursor`, `expected_cursor`) and read `GET /sync/{source}/cursor`: the items and the
+  `POST /sync/{source}` (`items`, `deleted`, `cursor`, `expected_cursor`) and read `GET /sync/{source}/cursor`: the items and the
   cursor commit together, and a stale `expected_cursor` is a 409, so no batch is skipped or applied twice.
   `db4ai sync gdrive --team eng` syncs Google Docs (exported as text) and text/Markdown files from Google Drive
   (including shared drives) through the Drive changes API, with an OAuth token you supply in the environment.
+  A file deleted (or trashed) in the source proposes archiving its item in the harness; nothing is archived until a
+  team owner approves, and the proposal is withdrawn if the file comes back first.
 - **BI-ready.** Structured data lives in real tables (`data.<team>_<name>`), so Tableau, Metabase and others connect directly.
   A trigger records every row change in the append-only `change_log`.
 

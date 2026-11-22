@@ -107,15 +107,24 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   on the previous cursor (mismatch → 409 / `CursorConflict`, nothing written). At most 500 records per batch; every
   cursor move is in `change_log`. Cursors are opaque and never hold content. Re-sending is idempotent, and an erased
   item's key is withheld, so a sync can't bring it back. Surfaces: `POST /sync/{source}`, `GET /sync/{source}/cursor`,
-  `db4ai sync <connector> <path>`. Built in: `transcripts` (a folder of `.vtt`/`.srt`/`.txt` → `meeting` items with
-  `speakers`, `duration_seconds`, `path`; cursor = newest mtime synced, files at that mtime are re-sent).
+  `db4ai sync <connector> <path>`.
+- **Source deletions**: a batch can also carry `deleted` keys (counted toward the 500). Each one whose item in the team
+  is active or stale gets an `archive_item` proposal in the same transaction (source `connector:<source>`, payload
+  item id, `for_version` and `source_deleted`; no key or title), tiered by `policies` (`ask_first` by default). Unknown,
+  archived, merged and erased items are ignored; re-sending is idempotent and a rejected deletion isn't re-proposed.
+  Saving a record withdraws its pending deletion proposals from that source (status `expired`); an approved archive
+  stays archived. Connectors whose cursor can't see deletions offer `deleted(known_keys)`, checked by `connectors.run`
+  after the batches against the live keys that have no pending or rejected deletion. Built in:
+  `transcripts` (a folder of `.vtt`/`.srt`/`.txt` → `meeting` items with `speakers`, `duration_seconds`, `path`;
+  cursor = newest mtime synced, files at that mtime are re-sent; deletions by comparing the folder with the live keys,
+  failing closed: a missing folder is an error, an empty one reports no deletions).
 - Built in: `gdrive` (`db4ai sync gdrive --team <t>`): Google Docs (exported as `text/plain`) and text/Markdown files
   (≤10 MB) the token's account can read, shared drives included, as `document` items (key = Drive file id; metadata
   `mime_type`, `modified_time`, `web_view_link`). OAuth token from the environment (`DB4AI_GDRIVE_TOKEN`, or a refresh
   token + client id/secret); DB4AI never stores it. Cursor = `list:<start>:<page>` during the first full listing (start
   = changes token taken before listing), then `changes:<token>`; one batch per API page, an idle sync writes nothing.
   429/5xx/rate-limit 403s are retried with backoff; a file whose export Drive refuses (403/404) is skipped and logged.
-  Removed and trashed files are ignored in v1.
+  A removed (deleted or no longer shared) or trashed file is a deletion; the first full listing reports none.
 - More connectors (Notion, Miro, Slack) build on the same framework.
 
 ## 7. Stack

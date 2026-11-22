@@ -41,11 +41,11 @@ def sync_cursor(conn: Conn, actor: Actor, source: str, team: str | None = None) 
 
 
 def sync_batch(conn: Conn, actor: Actor, source: str, *, items: list[dict], cursor: str | None,
-               expected_cursor: str | None, team: str | None = None) -> dict:
+               expected_cursor: str | None, team: str | None = None, deleted: list[str] | None = None) -> dict:
     records = [connectors.Record(key=i["key"], type=i["type"], title=i["title"], body=i.get("body", ""),
                                  metadata=i.get("metadata") or {}) for i in items]
     return jsonable(connectors.apply_batch(conn, actor, source, resolve_team(conn, actor, team), records,
-                                           cursor, expected_cursor))
+                                           cursor, expected_cursor, deleted))
 
 
 def search(conn: Conn, actor: Actor, query: str, *, types: list[str] | None = None, limit: int = 10) -> list[dict]:

@@ -9,8 +9,8 @@ Cursor (opaque to the framework, never holds content):
 * `changes:<token>` afterwards: the Drive changes API page token.
 
 Each API page becomes one batch, so a crash resumes at the last page saved. Synced files: Google Docs (exported as
-plain text) and plain text / Markdown files. Removed and trashed files are skipped in v1 (see ROADMAP
-"Source deletions in connectors").
+plain text) and plain text / Markdown files. A removed or trashed file is reported as a deletion, which proposes
+archiving its item through the harness.
 """
 
 from __future__ import annotations
@@ -177,17 +177,22 @@ class GoogleDrive:
                 "pageToken": token, "pageSize": self.page_size, "includeRemoved": "true", "spaces": "drive",
                 "fields": f"nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_FIELDS}))",
                 **_ALL_DRIVES})
-            files = [c.get("file") for c in data.get("changes", []) if not c.get("removed")]
-            records = self._records([f for f in files if f])
+            changes = data.get("changes", [])
+            # Removed (deleted, or the account lost access) or trashed: DB4AI can no longer read it from Drive, so
+            # the framework proposes archiving the item (ask_first). The last change to a file in the page wins.
+            last = {c.get("fileId") or (c.get("file") or {}).get("id"): c for c in changes}
+            deleted = [fid for fid, c in last.items()
+                       if fid and (c.get("removed") or (c.get("file") or {}).get("trashed"))]
+            records = self._records([c["file"] for fid, c in last.items() if fid not in deleted and c.get("file")])
             nxt = data.get("nextPageToken")
             new_start = data.get("newStartPageToken")
             if nxt:
-                yield Batch(records, f"changes:{nxt}")
+                yield Batch(records, f"changes:{nxt}", deleted)
                 token = nxt
                 continue
             # Last page: only yield if something changed or the token moved, so an idle sync writes nothing.
-            if records or new_start != token:
-                yield Batch(records, f"changes:{new_start or token}")
+            if records or deleted or new_start != token:
+                yield Batch(records, f"changes:{new_start or token}", deleted)
             return
 
 
