@@ -20,6 +20,7 @@ import re
 from typing import Any
 from uuid import UUID
 
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from . import store
@@ -32,8 +33,13 @@ REDACTED = "[redacted]"
 ERASED_KEY_PREFIX = "erased:"
 # Payload keys that only hold ids/numbers; everything else in a payload may carry content.
 _ID_KEYS = {"item_id", "src", "dst", "keep", "drop", "superseded_by", "kind", "confidence", "for_version",
-            "team_id"}
+            "team_id", "copy_of"}
 _ITEM_REFS = ("item_id", "src", "dst", "keep", "drop", "superseded_by")
+# Copies in other items (ROADMAP "Erasure of copied content"): offered as redact_item proposals.
+MAX_COPY_PROPOSALS = 100
+MIN_QUOTE_CHARS = 40   # an erased item's sentences shorter than this match too much to count as a quote
+MAX_QUOTES = 200
+_DATA_KEEP = ("_row_id", "item_id", "_created_at")  # data.* columns an erasure never touches
 
 
 def withheld_key(external_key: str) -> str:
@@ -114,6 +120,132 @@ def _count(conn: Conn, item_id: UUID, pat: re.Pattern) -> int:
     return counter[0]
 
 
+# ---------------------------------------------------------------- copies outside the item
+
+def _quotes(conn: Conn, item_id: UUID) -> list[str]:
+    """Sentences of the erased item that, found verbatim elsewhere, are taken to be copies."""
+    out: dict[str, None] = {}
+    for v in _versions(conn, item_id):
+        for s in re.split(r"(?<=[.!?])\s+|\n+", v["body"] or ""):
+            s = s.strip()
+            if len(s) >= MIN_QUOTE_CHARS:
+                out.setdefault(s, None)
+    return list(out)[:MAX_QUOTES]
+
+
+def _merged_into(conn: Conn, item_id: UUID) -> list[str]:
+    """Items this one was merged into: they carry its title as an alias."""
+    rows = conn.execute("select distinct payload ->> 'keep' k from harness_decisions where action_type = 'merge_items'"
+                        " and payload ->> 'drop' = %s and status in ('approved', 'applied_auto')",
+                        (str(item_id),)).fetchall()
+    return [r["k"] for r in rows if r["k"]]
+
+
+def _like(t: str) -> str:
+    return "%" + t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _items_containing(conn: Conn, exclude: UUID, terms: list[str], only: list[str] | None = None) -> dict[str, list[str]]:
+    """{item_id: [terms found]} over every version of other, not-erased items (title, body, metadata)."""
+    if not terms:
+        return {}
+    pats = [_like(t) for t in terms]
+    cond = "" if only is None else " and v.item_id = any(%(only)s::uuid[])"
+    rows = conn.execute(
+        "select v.item_id, t.term from item_versions v cross join lateral unnest(%(terms)s::text[], %(pats)s::text[])"
+        " as t(term, pat) join items_current c on c.id = v.item_id"
+        " where v.item_id <> %(x)s and c.status <> 'erased'" + cond +
+        " and (v.title ilike t.pat or v.body ilike t.pat or v.metadata::text ilike t.pat)"
+        " group by v.item_id, t.term order by v.item_id",
+        {"terms": terms, "pats": pats, "x": exclude, "only": only}).fetchall()
+    found: dict[str, list[str]] = {}
+    for r in rows:
+        found.setdefault(str(r["item_id"]), []).append(r["term"])
+    return found
+
+
+def _copies(conn: Conn, item_id: UUID, terms: list[str] | None) -> dict[str, list[str]]:
+    """Other items holding the erased (terms=None) or redacted text, with the passages each one holds."""
+    if terms is not None:
+        return _items_containing(conn, item_id, terms)
+    found = _items_containing(conn, item_id, _quotes(conn, item_id))
+    keeps = _merged_into(conn, item_id)
+    titles = sorted({v["title"] for v in _versions(conn, item_id) if v["title"] and v["title"].strip()})
+    for k, ts in _items_containing(conn, item_id, titles, only=keeps).items():
+        found[k] = sorted(set(found.get(k, [])) | set(ts))
+    return found
+
+
+def _propose_copies(conn: Conn, prov: Provenance, item_id: UUID, eid: UUID, copies: dict[str, list[str]]) -> dict:
+    from . import harness
+    from .auth import load_actor
+
+    admin = load_actor(conn, prov.actor_id)
+    made, waiting = [], []
+    for cid in sorted(copies)[:MAX_COPY_PROPOSALS]:
+        if conn.execute("select 1 from harness_decisions where status = 'pending' and payload ->> 'item_id' = %s"
+                        " and action_type = any(%s)", (cid, list(ACTIONS))).fetchone():
+            waiting.append(cid)  # an admin is already looking at this item's erasure or redaction
+            continue
+        reason = f"copy of content from item {item_id} (erasure {eid})"
+        r = harness.propose(conn, admin, "redact_item",
+                            {"item_id": cid, "reason": reason, "terms": _clean_terms(copies[cid]),
+                             "copy_of": str(item_id)}, reason=reason, source="erasure")
+        made.append({"item_id": cid, "decision_id": str(r["decision_id"]), "status": r["status"]})
+    return {"found": len(copies), "proposed": made, "already_pending": waiting,
+            "truncated": len(copies) > MAX_COPY_PROPOSALS}
+
+
+def _data_tables(conn: Conn) -> list[dict]:
+    return conn.execute("select table_name, columns from datasets where columns @> '[{\"name\": \"item_id\"}]'"
+                        " order by table_name").fetchall()
+
+
+def _data_rows(conn: Conn, item_id: UUID) -> int:
+    n = 0
+    for ds in _data_tables(conn):
+        n += conn.execute(sql.SQL("select count(*) n from data.{} where item_id = %s").format(
+            sql.Identifier(ds["table_name"])), (item_id,)).fetchone()["n"]
+    return n
+
+
+def _scrub_data(conn: Conn, item_id: UUID, pat: re.Pattern | None, counter: list[int]) -> int:
+    """Scrub data.* rows keyed by the item (erase: null the values; redact: replace terms) and their change_log.
+
+    Runs while the erasure setting is on. Updating a row makes the capture trigger log the old values; that
+    log row is scrubbed by the same pass, since it runs after the updates.
+    """
+    rows = 0
+    for ds in _data_tables(conn):
+        table = sql.Identifier(ds["table_name"])
+        content = [c for c in ds["columns"] if c["name"] not in _DATA_KEEP]
+        found = conn.execute(sql.SQL("select * from data.{} where item_id = %s").format(table), (item_id,)).fetchall()
+        for row in found:
+            if pat is None:
+                new = {c["name"]: None for c in content}
+            else:
+                new = {c["name"]: _replace(row[c["name"]], pat, counter) for c in content if c["type"] == "text"}
+            if content and new and any(row[k] != v for k, v in new.items()):
+                conn.execute(sql.SQL("update data.{} set {} where _row_id = %s").format(
+                    table, sql.SQL(", ").join(sql.SQL("{} = %s").format(sql.Identifier(k)) for k in new)),
+                    [*new.values(), row["_row_id"]])
+        rows += len(found)
+        entity = f"data.{ds['table_name']}"
+        for log in conn.execute("select id, before, after, reason from change_log where entity = %s"
+                                " and %s in (before ->> 'item_id', after ->> 'item_id')",
+                                (entity, str(item_id))).fetchall():
+            def scrub(j):
+                if j is None:
+                    return None
+                if pat is None:
+                    return {k: (v if k in _DATA_KEEP else None) for k, v in j.items()}
+                return {k: (v if k in _DATA_KEEP else _replace(v, pat, counter)) for k, v in j.items()}
+            reason = log["reason"] if pat is None else _replace(log["reason"], pat, counter)
+            conn.execute("update change_log set before = %s, after = %s, reason = %s where id = %s",
+                         (_jsonb(scrub(log["before"])), _jsonb(scrub(log["after"])), reason, log["id"]))
+    return rows
+
+
 # ---------------------------------------------------------------- diffs (shown to the admin)
 
 def _cur(conn: Conn, item_id) -> dict:
@@ -130,6 +262,8 @@ def _erase_diff(conn: Conn, p: dict) -> dict:
     return {"item": p["item_id"], "title": cur["title"], "erase": "all content of every version",
             "versions": cur["version"], "blobs": blobs,
             "decisions_mentioning_item": len(_decisions_about(conn, UUID(p["item_id"]))),
+            "data_rows": _data_rows(conn, UUID(p["item_id"])),
+            "copies_found": len(_copies(conn, UUID(p["item_id"]), None)),
             "reason": p.get("reason")}
 
 
@@ -138,7 +272,8 @@ def _redact_diff(conn: Conn, p: dict) -> dict:
     terms = _clean_terms(p.get("terms") or [])
     return {"item": p["item_id"], "title": cur["title"], "replace_with": REDACTED,
             "terms": {t: _count(conn, UUID(p["item_id"]), _pattern([t])) for t in terms},
-            "versions": cur["version"], "reason": p.get("reason")}
+            "versions": cur["version"], "data_rows": _data_rows(conn, UUID(p["item_id"])),
+            "copies_found": len(_copies(conn, UUID(p["item_id"]), terms)), "reason": p.get("reason")}
 
 
 # ---------------------------------------------------------------- apply
@@ -170,11 +305,12 @@ def _tombstone(conn: Conn, prov: Provenance, item_id: UUID, decision: dict, kind
                **counts) -> UUID:
     row = conn.execute(
         "insert into erasures (item_id, decision_id, kind, requested_by, approved_by, reason, versions, terms,"
-        " matches, blobs_deleted, blobs_kept) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id",
+        " matches, blobs_deleted, blobs_kept, data_rows, copies) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        " returning id",
         (item_id, decision["id"], kind, decision["proposed_by"], prov.actor_id,
          reason, counts.get("versions", 0),
          counts.get("terms", 0), counts.get("matches", 0), counts.get("blobs_deleted", 0),
-         counts.get("blobs_kept", 0)),
+         counts.get("blobs_kept", 0), counts.get("data_rows", 0), counts.get("copies", 0)),
     ).fetchone()
     return row["id"]
 
@@ -187,6 +323,7 @@ def _erase_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
     item_id, cur, decision = _begin(conn, prov, p)
     try:
         versions = _versions(conn, item_id)
+        copies = _copies(conn, item_id, None)  # before the scrub: it needs the content
         shas = sorted({v["blob_sha256"] for v in versions if v["blob_sha256"]})
         chash = store.content_hash(ERASED, "", None)
         conn.execute(
@@ -217,6 +354,7 @@ def _erase_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
         conn.execute("update links set reason = %s where (src_item = %s or dst_item = %s) and reason is not null",
                      (ERASED, item_id, item_id))
         _drop_derived(conn, item_id)
+        data_rows = _scrub_data(conn, item_id, None, [0])
 
         # Blobs: delete the row now (so nothing points at it after commit); the file goes via the outbox.
         deleted = kept = 0
@@ -229,7 +367,8 @@ def _erase_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
             deleted += 1
 
         eid = _tombstone(conn, prov, item_id, decision, "erase", _reason(decision), versions=len(versions),
-                         blobs_deleted=deleted, blobs_kept=kept)
+                         blobs_deleted=deleted, blobs_kept=kept, data_rows=data_rows,
+                         copies=min(len(copies), MAX_COPY_PROPOSALS))
         conn.execute("update harness_decisions set diff = %s where id = %s",
                      (Jsonb({"item": str(item_id), "erased": True, "versions": len(versions), "erasure_id": str(eid)}),
                       decision["id"]))
@@ -241,7 +380,8 @@ def _erase_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
                               status="erased")
     log_change(conn, prov, "item", str(item_id), "erase", after={"erasure_id": str(eid), "versions": len(versions)})
     return {"erasure_id": str(eid), "versions_scrubbed": len(versions), "new_version": r["version"],
-            "blobs_deleted": deleted, "blobs_kept": kept}
+            "blobs_deleted": deleted, "blobs_kept": kept, "data_rows": data_rows,
+            "copies": _propose_copies(conn, prov, item_id, eid, copies)}
 
 
 def _redact_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
@@ -252,6 +392,7 @@ def _redact_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
     try:
         versions = _versions(conn, item_id)
         matches = _count(conn, item_id, pat)  # occurrences in the item's own versions
+        copies = _copies(conn, item_id, terms)
         for v in versions:
             title, body = _replace(v["title"], pat, counter), _replace(v["body"], pat, counter)
             meta, reason = _replace(v["metadata"], pat, counter), _replace(v["reason"], pat, counter)
@@ -289,12 +430,14 @@ def _redact_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
                                 " and reason is not null", (item_id, item_id)).fetchall():
             conn.execute("update links set reason = %s where id = %s", (_replace(row["reason"], pat, counter), row["id"]))
         _drop_derived(conn, item_id)
+        data_rows = _scrub_data(conn, item_id, pat, counter)
     finally:
         _end(conn)
     # The request's own reason may quote a term; nothing written after the scrub may carry one.
     prov = Provenance(prov.actor_id, prov.source, _replace(prov.reason, pat, [0]), prov.decision_id)
     eid = _tombstone(conn, prov, item_id, decision, "redact", _replace(_reason(decision), pat, [0]),
-                     versions=len(versions), terms=len(terms), matches=matches)
+                     versions=len(versions), terms=len(terms), matches=matches, data_rows=data_rows,
+                     copies=min(len(copies), MAX_COPY_PROPOSALS))
     base = _cur(conn, item_id)
     history = list(base["metadata"].get("redactions", []))
     history.append({"id": str(eid), "decision_id": str(decision["id"]), "terms": len(terms)})
@@ -302,7 +445,8 @@ def _redact_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
     store.enqueue(conn, "enrich", {"item_id": str(item_id)}, dedupe_key=f"enrich:{item_id}")
     log_change(conn, prov, "item", str(item_id), "redact", after={"erasure_id": str(eid), "terms": len(terms)})
     return {"erasure_id": str(eid), "versions_scrubbed": len(versions), "matches": matches,
-            "new_version": r["version"]}
+            "new_version": r["version"], "data_rows": data_rows,
+            "copies": _propose_copies(conn, prov, item_id, eid, copies)}
 
 
 def erasures(conn: Conn, actor: Actor, item_id: UUID) -> list[dict]:
@@ -312,6 +456,6 @@ def erasures(conn: Conn, actor: Actor, item_id: UUID) -> list[dict]:
     actor.require_read(team["team_id"])
     return conn.execute(
         "select e.id, e.kind, e.reason, e.versions, e.terms, e.matches, e.blobs_deleted, e.blobs_kept,"
-        " e.decision_id, e.created_at, r.name as requested_by, a.name as approved_by"
+        " e.data_rows, e.copies, e.decision_id, e.created_at, r.name as requested_by, a.name as approved_by"
         " from erasures e join actors r on r.id = e.requested_by join actors a on a.id = e.approved_by"
         " where e.item_id = %s order by e.created_at", (item_id,)).fetchall()

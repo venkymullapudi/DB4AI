@@ -46,7 +46,12 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
   hashes the external key so a re-import is skipped, drops embeddings and chunks, and deletes blobs no other item
   uses (row in the transaction, file via a `blob_delete` outbox job). Redact replaces terms (case-insensitive) with
   `[redacted]` in the same places and re-enriches. Each writes an `erasures` tombstone (kind, counts, requester,
-  approver, reason) that never holds the erased content.
+  approver, reason, data rows, copies) that never holds the erased content.
+- **Copies** of the content outside the item: `data.*` rows with the item's id in `item_id` (e.g. a `promote_schema`
+  backfill) are scrubbed in the same transaction (erase nulls their values, redact replaces terms), and so is their
+  `change_log` history. Other items whose versions hold the erased text (redact: the terms; erase: body sentences of
+  40+ characters, plus the item's title in items it was merged into) each get a `redact_item` proposal (ask_first,
+  admin-only, at most 100 per erasure, source `erasure`, `copy_of` = the item), because a quote may be legitimate.
 - Structured datasets are real tables in the `data` schema. A row-level trigger writes every
   change to the shared append-only `change_log` with the same actor/source/reason fields.
 

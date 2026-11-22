@@ -203,3 +203,129 @@ def test_edited_redaction_terms_are_scrubbed_too(world):
     harness.decide(w.conn, w.root, r["decision_id"], True, edited_payload=edited)
     assert leaks(w.conn, "bluefin") == {}
     assert store.get_item(w.conn, w.alice, item)["body"] == "Codename [redacted] ships in Q3."
+
+
+# ---------------------------------------------------------------- copies outside the item
+
+def promote(w, type_, fields):
+    with w.conn.transaction():
+        r = harness.propose(w.conn, w.alice, "promote_schema",
+                            {"team_id": str(w.eng), "item_type": type_, "dataset_name": f"{type_}_fields",
+                             "fields": fields}, reason="recurring shape")
+    return harness.decide(w.conn, w.root, r["decision_id"], True)["result"]["table"]
+
+
+def save_meta(w, title, body, metadata, type_="deal"):
+    prov = Provenance(w.alice.id, "test", "import")
+    with transaction(w.conn, prov):
+        return store.save_item(w.conn, w.alice, prov, team_id=w.eng, type=type_, title=title, body=body,
+                               metadata=metadata)["item_id"]
+
+
+def data_leaks(conn, table, needle):
+    return conn.execute(f"select count(*) n from {table} x where to_jsonb(x)::text ilike %s",
+                        (f"%{needle}%",)).fetchone()["n"]
+
+
+def test_erase_scrubs_promoted_data_rows_and_their_change_log(world):
+    w = world
+    gone = save_meta(w, "Deal Vortigern", "x", {"customer": "Vortigern Ltd", "deal_size": 900})
+    kept = save_meta(w, "Deal Acme", "y", {"customer": "Acme", "deal_size": 100})
+    table = promote(w, "deal", [{"name": "customer", "type": "text"}, {"name": "deal_size", "type": "bigint"}])
+    assert data_leaks(w.conn, "change_log", "vortigern") >= 1
+
+    r = request(w, w.alice, gone)
+    assert harness.list_decisions(w.conn, w.root)[0]["diff"]["data_rows"] == 1
+    out = harness.decide(w.conn, w.root, r["decision_id"], True)
+    assert out["result"]["data_rows"] == 1
+
+    rows = {x["item_id"]: x for x in w.conn.execute(f"select * from {table}").fetchall()}
+    assert (rows[gone]["customer"], rows[gone]["deal_size"]) == (None, None)   # row kept, values gone
+    assert rows[kept]["customer"] == "Acme"
+    assert leaks(w.conn, "vortigern") == {} and data_leaks(w.conn, table, "vortigern") == 0
+    assert data_leaks(w.conn, "change_log", "Acme") >= 1                         # other rows' history intact
+    assert erasure.erasures(w.conn, w.alice, gone)[0]["data_rows"] == 1
+
+
+def test_redact_replaces_terms_in_promoted_data_rows(world):
+    w = world
+    item = save_meta(w, "Deal", "x", {"customer": "Vortigern Ltd", "deal_size": 900})
+    table = promote(w, "deal", [{"name": "customer", "type": "text"}, {"name": "deal_size", "type": "bigint"}])
+    r = request(w, w.alice, item, reason="client name", terms=["Vortigern"])
+    harness.decide(w.conn, w.root, r["decision_id"], True)
+    row = w.conn.execute(f"select * from {table}").fetchone()
+    assert (row["customer"], row["deal_size"]) == ("[redacted] Ltd", 900)
+    assert data_leaks(w.conn, "change_log", "vortigern") == 0 and leaks(w.conn, "vortigern") == {}
+
+
+def test_erase_offers_redaction_of_quotes_and_merge_aliases(world):
+    w = world
+    secret = "Zanzibar Quill was diagnosed with a rare condition in 2024."
+    item = save(w, w.alice, "Zanzibar Quill health", f"Private.\n{secret} Short bit.")["item_id"]
+    quoting = save(w, w.alice, "HR notes", f"As noted: {secret} Follow up.")["item_id"]
+    survivor = save(w, w.alice, "Health notes", "Unrelated wording entirely.")["item_id"]
+    unrelated = save(w, w.alice, "Private", "Short bit. Private.")["item_id"]   # short phrases don't count
+    with w.conn.transaction():
+        harness.propose(w.conn, w.alice, "merge_items", {"keep": str(survivor), "drop": str(item)},
+                        reason="dup", confidence=0.99)
+    assert "Zanzibar Quill health" in store.get_item(w.conn, w.alice, survivor)["metadata"]["aliases"]
+
+    r = request(w, w.alice, item)
+    assert harness.list_decisions(w.conn, w.root)[0]["diff"]["copies_found"] == 2
+    out = harness.decide(w.conn, w.root, r["decision_id"], True)
+    copies = out["result"]["copies"]
+    assert copies["found"] == 2 and not copies["truncated"]
+    by_item = {c["item_id"]: c for c in copies["proposed"]}
+    assert set(by_item) == {str(quoting), str(survivor)} and str(unrelated) not in by_item
+
+    pend = {d["payload"]["item_id"]: d for d in harness.list_decisions(w.conn, w.root)}
+    assert pend[str(quoting)]["action_type"] == "redact_item" and pend[str(quoting)]["payload"]["terms"] == [secret]
+    assert pend[str(survivor)]["payload"]["terms"] == ["Zanzibar Quill health"]
+    assert pend[str(quoting)]["payload"]["copy_of"] == str(item)
+    assert "Zanzibar" not in pend[str(quoting)]["reason"]
+    assert erasure.erasures(w.conn, w.alice, item)[0]["copies"] == 2
+
+    # Each copy is the admin's call: approve one, reject the other.
+    harness.decide(w.conn, w.root, by_item[str(quoting)]["decision_id"], True)
+    assert store.get_item(w.conn, w.alice, quoting)["body"] == "As noted: [redacted] Follow up."
+    harness.decide(w.conn, w.root, by_item[str(survivor)]["decision_id"], False)
+    assert "Zanzibar Quill health" in store.get_item(w.conn, w.alice, survivor)["metadata"]["aliases"]
+    assert leaks(w.conn, "rare condition") == {}
+
+
+def test_redact_offers_the_same_terms_in_other_items(world):
+    w = world
+    a = save(w, w.alice, "Call", "Jane Doe called about renewal.")["item_id"]
+    b = save(w, w.alice, "Other", "Spoke to JANE DOE today.")["item_id"]
+    save(w, w.alice, "Third", "Nothing here.")
+    r = request(w, w.alice, a, reason="pii", terms=["Jane Doe"])
+    out = harness.decide(w.conn, w.root, r["decision_id"], True)
+    assert [c["item_id"] for c in out["result"]["copies"]["proposed"]] == [str(b)]
+    assert store.get_item(w.conn, w.alice, b)["body"] == "Spoke to JANE DOE today."   # nothing until approved
+    harness.decide(w.conn, w.root, out["result"]["copies"]["proposed"][0]["decision_id"], True)
+    assert leaks(w.conn, "jane doe") == {}
+
+
+def test_change_log_bypass_for_data_rows_is_narrow(world):
+    w = world
+    a = save_meta(w, "A", "x", {"customer": "Alpha"})
+    b = save_meta(w, "B", "y", {"customer": "Beta"})
+    promote(w, "deal", [{"name": "customer", "type": "text"}])
+    r = request(w, w.alice, a)
+    logs = {x["after"]["item_id"]: x["id"] for x in w.conn.execute(
+        "select id, after from change_log where entity like 'data.%%'").fetchall()}
+
+    def attempt(sql, params):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            with w.conn.transaction():
+                w.conn.execute("select set_config('db4ai.erasure', %s, true)", (str(r["decision_id"]),))
+                w.conn.execute(sql, params)
+
+    attempt("update change_log set after = '{}' where id = %s", (logs[str(b)],))                  # other item's row
+    attempt("update change_log set after = '{}' where id = %s", (logs[str(a)],))                  # drops item_id
+    attempt("update change_log set after = jsonb_build_object('item_id', %s::text) where id = %s",
+            (str(b), logs[str(a)]))                                                                 # re-points it
+    with w.conn.transaction():
+        w.conn.execute("select set_config('db4ai.erasure', %s, true)", (str(r["decision_id"]),))
+        w.conn.execute("update change_log set after = jsonb_build_object('item_id', %s::text) where id = %s",
+                       (str(a), logs[str(a)]))

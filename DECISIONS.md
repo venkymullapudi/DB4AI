@@ -150,3 +150,37 @@ with (or after) CI against `pgvector/pgvector:pg16`.
   mechanism.
 - **Q: Is building this an owner-level decision?** No: the owner put it on the roadmap. It only deletes data when an
   admin approves a specific request, and nothing existing is migrated or removed by the migration.
+
+## 2026-11-22 — erasure of copied content
+- **Q: Which copies are in scope?** Three: (1) rows in `data.*` tables that carry the item's id in an `item_id` column
+  (the `promote_schema` backfill, or any dataset with that column) and their `change_log` rows; (2) merge aliases: the
+  erased item's title in the `aliases` of the item it was merged into; (3) other items whose title, body or metadata, in
+  any version, contain the erased text (quotes, enrichment summaries that repeat it).
+- **Q: Scrub them in the same transaction or offer them?** Depends on how sure we are that it's a copy. `data.*` rows
+  keyed by the item id are unambiguously derived from it, so they are scrubbed in the same approved transaction (erase
+  nulls every column except `_row_id`, `item_id`, `_created_at`; redact replaces terms in text columns). Text in other
+  items may be a legitimate quote, so each such item gets its own `redact_item` proposal (ask_first, admin-only, as
+  always) for an admin to approve or reject one by one. That's what the roadmap asked for ("find and offer").
+- **Q: What counts as "the erased text" when looking in other items?** For redact: the terms themselves. For erase:
+  sentences of 40+ characters from any version's body (verbatim, case-insensitive), at most 200 of them, because short
+  phrases and titles ("Weekly sync") match far too much. The item's titles are only searched in items it was merged
+  into (that's where the alias copy lives), whatever their length. Each proposal only names the passages found in that
+  item.
+- **Q: How many proposals?** At most 100 per erasure (`erasure.MAX_COPY_PROPOSALS`); the result and tombstone say
+  how many were found and whether the list was cut. Already-erased items are skipped. Rejected proposals are not made
+  again (fingerprint), as with any decision.
+- **Q: Doesn't a pending proposal hold erased text?** Yes, it has to name what to redact. That text is still in the
+  copy item anyway, so it adds no new exposure; approving it scrubs both (redact scrubs its own request). The proposals
+  are made after the erased item's own scrub, so they aren't scrubbed by it, and their payload names the source only in
+  `copy_of` (not an item ref, so it doesn't widen what the triggers allow).
+- **Q: Who proposes them?** The approving admin (`proposed_by`), source `erasure`, reason
+  `copy of content from item <id> (erasure <id>)`, which holds no content.
+- **Q: How do the triggers allow the `change_log` scrub for `data.*` rows?** Migration `007_erasure_copies.sql`
+  extends the `change_log` guard: during an erasure, rows whose entity is `data.*` and whose `before` or `after` has
+  `item_id` = the target may change `before`/`after`/`reason`, as long as the new JSON still names the same `item_id`.
+  The check reads the row itself, so it works for rows deleted earlier too. Updating the data row fires the capture
+  trigger, which logs the old content; that new log row is scrubbed in the same pass.
+- **Q: Tombstone?** `erasures` gains `data_rows` and `copies` (proposals made). The admin's diff shows `data_rows` and
+  `copies_found` before approving.
+- **Not owner-level:** nothing is changed without an admin approving a specific request; the migration only adds
+  columns and replaces a trigger function.

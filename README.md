@@ -17,6 +17,8 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   replace chosen terms with `[redacted]` everywhere (`POST /items/{id}/redact`). Anyone who can read the item can
   ask; only an admin can approve. Ids, version numbers and provenance stay, and a tombstone
   (`GET /items/{id}/erasures`) records what kind of erasure it was, who asked, who approved and why.
+  Copies go too: `data.*` rows keyed by the item (and their change log) are scrubbed in the same transaction, and
+  each other item that quotes the erased text or holds it as a merge alias gets its own `redact_item` proposal.
 - **Self-maintenance.** Background maintainers enrich items (summary, tags, entities, embeddings), link related
   items, merge near-duplicates, mark memories stale when newer items contradict them, propose turning
   recurring metadata into real tables, and clean up after themselves.
