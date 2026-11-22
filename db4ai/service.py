@@ -6,10 +6,12 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from . import ask as ask_mod
 from . import datasets, erasure, harness, store
 from .auth import Actor, team_id_by_name
 from .db import Conn, Provenance, transaction
 from .embeddings import get_embedder
+from .llm import get_llm
 
 
 def resolve_team(conn: Conn, actor: Actor, team: str | None) -> UUID:
@@ -36,6 +38,13 @@ def save(conn: Conn, actor: Actor, *, type: str, title: str, body: str = "", tea
 
 def search(conn: Conn, actor: Actor, query: str, *, types: list[str] | None = None, limit: int = 10) -> list[dict]:
     return jsonable(store.search(conn, actor, query, embedder=get_embedder(), types=types, limit=limit))
+
+
+def ask(conn: Conn, actor: Actor, question: str, *, types: list[str] | None = None, limit: int = 8,
+        llm=None) -> dict:
+    """Answer from items the actor can read, citing item ids and versions. Read-only."""
+    return jsonable(ask_mod.ask(conn, actor, question, llm=llm or get_llm(), embedder=get_embedder(),
+                                types=types, limit=limit))
 
 
 def get(conn: Conn, actor: Actor, item_id: str) -> dict:

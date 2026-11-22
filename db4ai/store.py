@@ -307,7 +307,7 @@ def similar_chunks(conn: Conn, vec: list[float], model: str, *, team_ids: list[U
     """Best-matching chunk per item, for chunks cut from the item's current content."""
     finish = (
         "select * from ("
-        " select distinct on (c.id) c.id, c.title, c.type, c.team_id, c.status, c.updated_at, 1 - k.dist as score,"
+        " select distinct on (c.id) c.id, c.version, c.title, c.type, c.team_id, c.status, c.updated_at, 1 - k.dist as score,"
         " k.chunk_no, k.start_char, k.end_char,"
         " substr(c.body, k.start_char + 1, k.end_char - k.start_char) as chunk_text"
         " from cand k join items_current c on c.id = k.item_id and c.content_hash = k.content_hash"
@@ -344,7 +344,7 @@ def search(conn: Conn, actor: Actor, query: str, *, embedder=None, limit: int = 
     """
     teams = None if actor.is_admin else list(actor.teams)
     fts = conn.execute(
-        "select c.id, c.title, c.type, c.team_id, c.status, c.updated_at,"
+        "select c.id, c.version, c.title, c.type, c.team_id, c.status, c.updated_at,"
         " ts_rank(to_tsvector('english', c.title || ' ' || c.body), plainto_tsquery('english', %s)) as score"
         " from items_current c"
         " where to_tsvector('english', c.title || ' ' || c.body) @@ plainto_tsquery('english', %s)"

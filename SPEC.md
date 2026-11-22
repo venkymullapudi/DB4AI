@@ -84,6 +84,12 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
 ## 6. Ingestion (push-based)
 - MCP write tools: `save_meeting`, `save_document`, `remember`, `log_decision`, `search`, `get_item`, `history`, `revert`,
   `request_erasure`, `request_redaction`.
+- **`ask`** (MCP tool and `POST /ask`): answers a question from the items the actor can read. It retrieves with search
+  (team access, active items only, best chunk per item; full-text-only hits use their best-matching chunk), gives the
+  numbered passages to the LLM (heuristic: extractive sentences), and returns `answered`, `answer`, `citations`
+  (item id, version, title, quote) and the `sources` searched. Citations to passages it wasn't given are dropped;
+  a quote not found verbatim in its passage is kept as `null`. Without at least one verbatim quote the answer is not
+  returned (`answered: false`, fail closed). Read-only: no versions, decisions or logs are written.
 - CLI import of files/folders: md, txt, pdf, docx → items; csv → structured dataset.
 - Memory repo import: Markdown/Obsidian vault (frontmatter → metadata, `[[wikilinks]]` → links);
   re-import only adds versions for changed files.

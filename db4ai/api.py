@@ -42,6 +42,12 @@ class RedactIn(BaseModel):
     terms: list[str]
 
 
+class AskIn(BaseModel):
+    question: str
+    type: str | None = None
+    limit: int = 8
+
+
 class DecisionIn(BaseModel):
     approve: bool
     note: str | None = None
@@ -128,6 +134,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/search")
     def get_search(q: str, type: str | None = None, limit: int = 10, a: Actor = Depends(actor), c: Conn = Depends(conn)):
         return service.search(c, a, q, types=[type] if type else None, limit=limit)
+
+    @app.post("/ask")
+    def post_ask(body: AskIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.ask(c, a, body.question, types=[body.type] if body.type else None, limit=body.limit)
 
     @app.get("/datasets/{name}")
     def get_dataset(name: str, team: str | None = None, limit: int = 100, a: Actor = Depends(actor), c: Conn = Depends(conn)):

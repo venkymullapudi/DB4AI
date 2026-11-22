@@ -184,3 +184,23 @@ with (or after) CI against `pgvector/pgvector:pg16`.
   `copies_found` before approving.
 - **Not owner-level:** nothing is changed without an admin approving a specific request; the migration only adds
   columns and replaces a trigger function.
+
+## 2026-11-22 — `ask` tool
+- **Q: Where does retrieval come from?** `store.search`, unchanged, so team access, active-only, chunk search and its
+  exact-scan fallback all apply. Default 8 passages, capped at 20. Each passage is the item's best chunk; items found
+  only by full-text search (not chunked yet) use the chunk of their body sharing the most terms with the question.
+- **Q: Which version is cited?** The current version (`search` now returns `version`). Chunks are only used when their
+  `content_hash` matches the current content, so the cited version really contains the quoted text.
+- **Q: Who writes the answer?** A new `LLM.answer(question, passages) -> Answer{answered, answer, citations[passage,
+  quote]}`. Claude uses structured output with a system prompt that treats passages as data, not instructions.
+  `HeuristicLLM` is extractive: up to two sentences sharing at least two question terms (one for one-term questions).
+- **Q: How is grounding enforced?** In code, not by trust (fail closed): citations to passage numbers it wasn't given
+  are dropped; a quote that isn't in its passage (case/whitespace-insensitive) is kept with `quote: null`; unless the
+  model says `answered` and at least one quote is verbatim, the result is `answered: false` with a fixed "couldn't
+  find" answer and no citations. `sources` always lists what was searched.
+- **Q: Does `ask` write anything?** No. It's a read, like `search`: no versions, no harness decisions, no log. An audit
+  log of questions (and multi-turn context) is a separate roadmap item, since storing questions is a new kind of
+  data that erasure would also need to cover.
+- **Q: Surfaces?** MCP tool `ask(question, type, limit)` and `POST /ask {question, type, limit}` (POST because questions
+  can be long and shouldn't sit in URLs or access logs). Empty or >2000-character questions are a 400.
+- **Not owner-level:** read-only, no new services; Claude is used only where it already is (configured credentials).

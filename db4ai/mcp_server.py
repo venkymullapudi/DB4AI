@@ -21,7 +21,7 @@ mcp = MCPServer(
     name="db4ai",
     instructions=(
         "DB4AI is the company's self-maintaining database for meetings, documents, team memory, decisions "
-        "and analytics datasets. Search before saving to avoid duplicates. Every write is versioned and "
+        "and analytics datasets. Use `ask` to answer questions from it (cite the item ids it returns) and search before saving to avoid duplicates. Every write is versioned and "
         "attributed; nothing is overwritten. Pending AIDBHarness decisions need a human: show the diff and "
         "evidence to the user and only call harness_decide with their explicit answer."
     ),
@@ -82,6 +82,17 @@ def search(query: str, type: str | None = None, limit: int = 10) -> list[dict[st
     """Hybrid full-text + semantic search over items you can access. `type`: meeting|document|memory|decision."""
     c, a = _ctx()
     return service.search(c, a, query, types=[type] if type else None, limit=limit)
+
+
+@mcp.tool()
+def ask(question: str, type: str | None = None, limit: int = 8) -> dict[str, Any]:
+    """Answer a question from DB4AI items you can access, citing the item ids and versions used.
+
+    Returns `answered` (false if nothing relevant was found), `answer`, `citations` (item_id, version, title,
+    quote) and the `sources` searched. Read-only.
+    """
+    c, a = _ctx()
+    return service.ask(c, a, question, types=[type] if type else None, limit=limit)
 
 
 @mcp.tool()

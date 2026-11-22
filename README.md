@@ -27,7 +27,9 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   decides the tier, and unknown actions are always `ask_first`.
 - **AIDBHarness.** Approving a decision applies the change in the same transaction. Rejections are
   remembered, and expired decisions are never applied. You can answer from Claude (MCP), the web page or the HTTP API.
-- **Built for Claude.** An MCP server with `save_meeting`, `save_document`, `remember`, `log_decision`, `search`,
+- **Answers with citations.** `ask` (MCP tool or `POST /ask`) answers a question from the items you can read and
+  cites the item ids, versions and exact quotes it used; if nothing it can quote supports an answer, it says so.
+- **Built for Claude.** An MCP server with `ask`, `save_meeting`, `save_document`, `remember`, `log_decision`, `search`,
   `get_item`, `history`, `revert`, `dataset`, `request_erasure`, `request_redaction`, `harness_list_pending`,
   `harness_decide` and `harness_revert`.
 - **Ingestion.** A CLI imports Markdown/Obsidian vaults (frontmatter becomes metadata, `[[wikilinks]]` become links),

@@ -25,7 +25,7 @@ right priority, with a one-line reason.
       mention it. Its text can also live in other places: merge aliases on the surviving item, rows backfilled into
       `data.*` tables by `promote_schema` (and their `change_log` rows), and other items that quote it. Find and
       offer to scrub those (e.g. propose `redact_item` on each match). Why: a complete erasure answer for GDPR.
-- [ ] **`ask` tool.** Claude asks a question and gets an answer grounded in DB4AI items, citing item ids and
+- [x] **`ask` tool.** Claude asks a question and gets an answer grounded in DB4AI items, citing item ids and
       versions (MCP + HTTP). Why: storing and searching isn't answering.
 
 ## Next: get real data flowing in
@@ -33,6 +33,8 @@ right priority, with a one-line reason.
 - [ ] Notifications for pending harness decisions (Slack/Teams webhook, via an outbox job).
 - [ ] Connector framework on top of `POST /items` (incremental sync cursor per source), then the first
       connectors: Google Drive/Docs, meeting transcripts.
+- [ ] **`ask` follow-ups.** Optional audit log of questions asked (who asked what, which items were cited), and
+      multi-turn context. Why: v1 `ask` is stateless and leaves no trace of what was read.
 - [ ] "As of" queries: read any item or search results as they were at a given time.
 
 ## Later
