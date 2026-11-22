@@ -52,8 +52,9 @@ def main(argv: list[str] | None = None) -> None:
     i.add_argument("--vault", action="store_true", help="treat as a Markdown/Obsidian memory vault")
 
     sy = sub.add_parser("sync", help="incremental sync from a connector")
-    sy.add_argument("connector", choices=["transcripts"])
-    sy.add_argument("path", type=Path, help="folder the connector reads (transcripts: .vtt/.srt/.txt files)")
+    sy.add_argument("connector", choices=["transcripts", "gdrive"])
+    sy.add_argument("path", type=Path, nargs="?",
+                    help="transcripts: folder of .vtt/.srt/.txt files (gdrive reads DB4AI_GDRIVE_* from the env)")
     sy.add_argument("--team", required=True)
     sy.add_argument("--as", dest="actor", help="actor name to attribute the sync to")
     sy.add_argument("--source", help="cursor name (default: the connector name)")
@@ -111,7 +112,14 @@ def main(argv: list[str] | None = None) -> None:
         with conn.transaction():
             actor = _actor(conn, a.actor)
         team_id = auth.team_id_by_name(conn, a.team)
-        if not a.path.is_dir():
+        if a.connector == "gdrive":
+            from .gdrive import DriveError, GoogleDrive
+            try:
+                _out(connectors.run(conn, actor, a.source or a.connector, team_id, GoogleDrive()))
+            except DriveError as e:
+                sys.exit(str(e))
+            return
+        if a.path is None or not a.path.is_dir():
             sys.exit(f"{a.path} is not a folder")
         _out(connectors.run(conn, actor, a.source or a.connector, team_id, connectors.TranscriptFolder(a.path)))
     elif a.cmd == "maintain":

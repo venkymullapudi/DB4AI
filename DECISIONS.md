@@ -256,3 +256,34 @@ with (or after) CI against `pgvector/pgvector:pg16`.
   title = file stem; hidden paths skipped. Cursor = newest mtime (ns) synced; files at exactly that mtime are re-sent
   (idempotent) so a file written in the same tick isn't missed.
 - **Not owner-level:** no external services or accounts; the migration only adds a table.
+
+
+## 2026-11-23 — Google Drive/Docs connector
+- **Q: Where does it live?** `db4ai/gdrive.py`, a `Connector` (`fetch(cursor) → batches`) used through `connectors.run`,
+  so items, cursor moves, idempotency and erased-key withholding all come from the framework. CLI:
+  `db4ai sync gdrive --team <t>` (the path argument is now optional and only used by `transcripts`).
+- **Q: How does it authenticate?** The owner supplies the OAuth token in the environment, as the roadmap says:
+  `DB4AI_GDRIVE_TOKEN` (access token), and/or `DB4AI_GDRIVE_REFRESH_TOKEN` + `DB4AI_GDRIVE_CLIENT_ID` +
+  `DB4AI_GDRIVE_CLIENT_SECRET` so a long-running sync survives the 1-hour access-token lifetime (refresh on the first
+  401). No OAuth flow and no token in the database: it's a secret, like webhook URLs. Missing token → clear error.
+- **Q: What is the cursor?** First sync: take `changes.getStartPageToken` *before* listing, then page through
+  `files.list`; mid-listing cursor `list:<start>:<pageToken>` so a crash resumes at the last saved page; afterwards
+  `changes:<token>`. Changes made while listing are replayed from `<start>` (re-sending is idempotent). Page tokens are
+  opaque and hold no content.
+- **Q: Batch size?** One batch per API page (100 files), well under the framework's 500. The last changes page is only
+  applied if it has records or the token moved, so an idle sync writes no cursor row or `change_log` entry.
+- **Q: Which files?** Google Docs (exported `text/plain`, BOM and CRLF normalised) and `text/plain` / `text/markdown`
+  files (downloaded), up to 10 MB (Drive's export limit). Sheets, Slides, PDFs and .docx are skipped in v1; added to
+  ROADMAP with folder scoping ("Drive folder scoping and more file types").
+- **Q: Which part of Drive?** Everything the token's account can read, shared drives included (`corpora=allDrives`,
+  `supportsAllDrives`). Folder scoping needs parent-ancestry tracking across changes, so it's a separate roadmap item.
+  Limiting scope today = giving DB4AI an account (or token) that only sees the right folders.
+- **Q: Item shape?** Type `document`, key = Drive file id (stable across renames and moves), title = file name,
+  metadata `mime_type`, `modified_time`, `web_view_link`. Not owners/emails: personal data that would add erasure scope.
+- **Q: Errors?** 429, 5xx and `rateLimitExceeded`/`userRateLimitExceeded` 403s retry with exponential backoff (4 tries,
+  ≤32 s). A file whose export or download returns 403/404 (export disabled, deleted meanwhile) is skipped and logged
+  rather than blocking the sync forever. Other failures raise `DriveError`; batches already applied stay applied.
+- **Q: Deleted/trashed files?** Ignored in v1, per the next roadmap item ("Source deletions in connectors").
+- **Q: Tests?** A fake Drive behind `httpx.MockTransport` (paged list and changes, export, media, token refresh); no
+  network or Google account.
+- **Not owner-level:** no new account or paid service; the owner opts in by supplying their own token. No migration.

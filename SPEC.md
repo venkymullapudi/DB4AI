@@ -109,7 +109,14 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   item's key is withheld, so a sync can't bring it back. Surfaces: `POST /sync/{source}`, `GET /sync/{source}/cursor`,
   `db4ai sync <connector> <path>`. Built in: `transcripts` (a folder of `.vtt`/`.srt`/`.txt` → `meeting` items with
   `speakers`, `duration_seconds`, `path`; cursor = newest mtime synced, files at that mtime are re-sent).
-- More connectors (Drive, Notion, Miro, Slack) build on the same framework.
+- Built in: `gdrive` (`db4ai sync gdrive --team <t>`): Google Docs (exported as `text/plain`) and text/Markdown files
+  (≤10 MB) the token's account can read, shared drives included, as `document` items (key = Drive file id; metadata
+  `mime_type`, `modified_time`, `web_view_link`). OAuth token from the environment (`DB4AI_GDRIVE_TOKEN`, or a refresh
+  token + client id/secret); DB4AI never stores it. Cursor = `list:<start>:<page>` during the first full listing (start
+  = changes token taken before listing), then `changes:<token>`; one batch per API page, an idle sync writes nothing.
+  429/5xx/rate-limit 403s are retried with backoff; a file whose export Drive refuses (403/404) is skipped and logged.
+  Removed and trashed files are ignored in v1.
+- More connectors (Notion, Miro, Slack) build on the same framework.
 
 ## 7. Stack
 Python ≥3.11, FastAPI, psycopg 3 with plain SQL and a small SQL migration runner, pgvector,

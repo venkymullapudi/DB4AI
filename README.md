@@ -39,6 +39,8 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   and only reads files newer than its cursor on the next run. Connectors that run elsewhere push batches to
   `POST /sync/{source}` (`items`, `cursor`, `expected_cursor`) and read `GET /sync/{source}/cursor`: the items and the
   cursor commit together, and a stale `expected_cursor` is a 409, so no batch is skipped or applied twice.
+  `db4ai sync gdrive --team eng` syncs Google Docs (exported as text) and text/Markdown files from Google Drive
+  (including shared drives) through the Drive changes API, with an OAuth token you supply in the environment.
 - **BI-ready.** Structured data lives in real tables (`data.<team>_<name>`), so Tableau, Metabase and others connect directly.
   A trigger records every row change in the append-only `change_log`.
 
@@ -107,10 +109,12 @@ deployment, writes an item over HTTP, runs the maintainers and searches for it. 
 | `DB4AI_VECTOR_CANDIDATES` | `200` | nearest rows taken from the vector index before team/type filters; too few results after filtering falls back to an exact scan |
 | `DB4AI_NOTIFY_WEBHOOKS` | — | comma-separated Slack/Teams incoming-webhook URLs notified of pending harness decisions; prefix `teams:` for a Teams Workflows webhook (Adaptive Card) |
 | `DB4AI_NOTIFY_DELAY_SECONDS` | `60` | wait before sending, so a burst of proposals becomes one message |
+| `DB4AI_GDRIVE_TOKEN` | — | Google Drive OAuth access token (scope `drive.readonly`) for `db4ai sync gdrive` |
+| `DB4AI_GDRIVE_REFRESH_TOKEN`, `DB4AI_GDRIVE_CLIENT_ID`, `DB4AI_GDRIVE_CLIENT_SECRET` | — | instead of (or with) the access token: refresh it when it expires |
 | `DB4AI_PUBLIC_URL` | — | base URL of the web UI, used for the review link in notifications |
 | `DB4AI_LINK_THRESHOLD` / `DB4AI_DUP_THRESHOLD` | `0.55` / `0.92` | similarity thresholds |
 
 ## Not in v1
 
-Connectors for Google Drive, Notion, Miro and Slack (they will build on `POST /sync/{source}`), and bitemporal
+Connectors for Notion, Miro and Slack (they will build on `POST /sync/{source}`), and bitemporal
 "as of" queries.
