@@ -40,6 +40,8 @@ def _insert_version(conn: Conn, prov: Provenance, item_id: UUID, base: dict | No
                     merged_into: UUID | None = None, blob_sha256: str | None = None) -> dict:
     # Serialise writers of the same item (row lock; items itself is never updated).
     conn.execute("select id from items where id = %s for update", (item_id,))
+    if base is not None and base["status"] == "erased":
+        raise ValueError(f"item {item_id} was erased; it accepts no new versions")
     row = conn.execute("select coalesce((select version from item_heads where item_id = %s), 0) + 1 as v",
                        (item_id,)).fetchone()
     chash = content_hash(title, body, blob_sha256)
@@ -77,6 +79,12 @@ def save_item(conn: Conn, actor: Actor, prov: Provenance, *, team_id: UUID, type
         row = conn.execute("select id from items where team_id=%s and type=%s and external_key=%s",
                            (team_id, type, external_key)).fetchone()
         item_id = row["id"] if row else None
+        if item_id is None:  # an erased item keeps a hash of its key so a re-import can't resurrect it
+            from .erasure import withheld_key
+            gone = conn.execute("select id from items where team_id=%s and type=%s and external_key=%s",
+                                (team_id, type, withheld_key(external_key))).fetchone()
+            if gone is not None:
+                return {"item_id": gone["id"], "version": None, "changed": False, "erased": True}
     if item_id is None:
         item_id = conn.execute(
             "insert into items (team_id, type, external_key, created_by) values (%s,%s,%s,%s)"
@@ -89,6 +97,8 @@ def save_item(conn: Conn, actor: Actor, prov: Provenance, *, team_id: UUID, type
         item_id = item_id["id"]
         log_change(conn, prov, "item", str(item_id), "create", after={"type": type, "team_id": str(team_id)})
     base = _current(conn, item_id)
+    if base is not None and base["status"] == "erased":
+        return {"item_id": item_id, "version": base["version"], "changed": False, "erased": True}
     if base is not None:
         merged_meta = {**base["metadata"], **metadata}
         if (base["content_hash"] == content_hash(title, body, blob_sha256)

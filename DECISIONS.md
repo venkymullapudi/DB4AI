@@ -112,3 +112,41 @@ with (or after) CI against `pgvector/pgvector:pg16`.
 - **Q: Tags merge or replace?** Merge with existing tags, as `add_tags` did (shared `_merge_ai` helper).
 - **Q: Rejection fingerprint?** Unchanged mechanism: the fingerprint covers the whole payload minus
   `for_version`, so a rejected enrichment isn't re-proposed with identical values.
+
+## 2026-11-22 — redaction and erasure via the AIDBHarness
+- **Q: One action or two?** Two registered actions: `erase_item {item_id, reason}` (wipe all content) and
+  `redact_item {item_id, reason, terms}` (replace terms with `[redacted]`, keep the rest). Different diffs,
+  different effects on blobs and enrichment, one shared module (`db4ai/erasure.py`).
+- **Q: Who can ask, who can approve?** Anyone who can read the item can ask (HTTP, MCP, or `erasure.request`), and a
+  reason is required. Only admins can approve (`harness.ADMIN_ONLY`), not team owners. The tier is forced to
+  `ask_first` in code, so a policy row set to `auto` can't loosen it (fail closed). Neither action can be reverted.
+- **Q: How do we bypass the append-only triggers safely?** `006_erasure.sql` replaces the `item_versions`, `items` and
+  `change_log` triggers. An `UPDATE` passes only while `db4ai.erasure` (transaction-local) names a *pending*
+  `erase_item`/`redact_item` decision, only for that decision's item, and only if nothing changes except the content
+  columns (title, body, metadata, blob, content hash, reason; `external_key` on `items`; before/after/reason on
+  `change_log`). Deletes are always blocked. The setting is set and cleared inside the apply, which runs in the
+  approve transaction. Anyone with raw SQL could set it too, but they could also drop the triggers; this guards the
+  app against its own bugs, not a DBA.
+- **Q: What exactly is scrubbed?** Every version of the item; its `change_log` rows and those written under decisions
+  that mention it; those decisions' payload (erase keeps only id keys), diff, evidence, reason and note; link reasons;
+  embeddings and chunks (deleted: they're derived). Erase also nulls blobs and hashes the external key. Ids, version
+  numbers and provenance stay, so history still shows who changed what and when.
+- **Q: Tombstone?** An append-only `erasures` row (kind, versions, term count, matches, blobs deleted/kept, requester,
+  approver, reason) plus a final version: `erased` status for erase (no further writes, `store` refuses them), or a
+  `redactions` metadata entry for redact. The tombstone never stores the terms or content hashes of the old content.
+- **Q: Blobs?** Content-addressed, so another item may share the bytes: those are kept (counted as `blobs_kept`).
+  Otherwise the `blobs` row is deleted in the transaction and the file by a `blob_delete` outbox job after commit, so a
+  row never points at a missing blob. If the job is lost, hygiene's orphan GC removes the file anyway.
+- **Q: Re-import after erase?** The external key becomes `erased:<sha256(key)>`; `save_item` sees it and returns
+  `{"erased": true, "changed": false}` instead of creating a new copy. A redacted item's key is hashed the same way
+  only if it contains a term. Re-importing an unredacted source over a redacted item will bring the text back: redact
+  the source too.
+- **Q: Redaction terms are themselves sensitive. Where do they end up?** Scrubbed from the request decision itself
+  after applying (payload, diff, reason), and from the reason on the approval's change_log row (`decide` now re-reads
+  the stored reason after apply). An edited payload is stored *before* apply so its terms get scrubbed too. Matching is
+  case-insensitive, longest term first.
+- **Q: Data outside the item (merge aliases, `promote_schema` rows in `data.*`, quotes in other items)?** Out of scope
+  for this run; added to `ROADMAP.md` as "Erasure of copied content". Not an owner question: it's more of the same
+  mechanism.
+- **Q: Is building this an owner-level decision?** No: the owner put it on the roadmap. It only deletes data when an
+  admin approves a specific request, and nothing existing is migrated or removed by the migration.

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Callable
 from uuid import UUID
 
-from . import datasets, store
+from . import datasets, erasure, store
 from .auth import add_member, load_actor
 from .db import Conn, Provenance, log_change
 
@@ -194,4 +194,7 @@ REGISTRY: dict[str, Action] = {
     "merge_items": Action(_team_of_item("keep"), _merge_diff, _merge_apply, _revert_versions),
     "promote_schema": Action(lambda c, p: UUID(p["team_id"]), _promote_diff, _promote_apply, None),
     "change_access": Action(lambda c, p: UUID(p["team_id"]), lambda c, p: dict(p), _access_apply, None),
+    # Redaction/erasure: always ask_first, admin-only (see harness.ADMIN_ONLY), never revertible.
+    "erase_item": Action(_team_of_item("item_id"), erasure._erase_diff, erasure._erase_apply, None),
+    "redact_item": Action(_team_of_item("item_id"), erasure._redact_diff, erasure._redact_apply, None),
 }

@@ -33,6 +33,15 @@ class ItemIn(BaseModel):
     reason: str | None = None
 
 
+class EraseIn(BaseModel):
+    reason: str
+
+
+class RedactIn(BaseModel):
+    reason: str
+    terms: list[str]
+
+
 class DecisionIn(BaseModel):
     approve: bool
     note: str | None = None
@@ -76,6 +85,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": str(exc)}, status_code=404)
 
+    @app.exception_handler(ValueError)
+    def _invalid(request: Request, exc: ValueError):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+
     @app.exception_handler(HarnessError)
     def _harness(request: Request, exc: HarnessError):
         from fastapi.responses import JSONResponse
@@ -98,6 +112,18 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.post("/items/{item_id}/revert/{version}")
     def post_revert(item_id: str, version: int, a: Actor = Depends(actor), c: Conn = Depends(conn)):
         return service.revert(c, a, item_id, version, source="http")
+
+    @app.post("/items/{item_id}/erase")
+    def post_erase(item_id: str, body: EraseIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.request_erasure(c, a, item_id, body.reason, source="http")
+
+    @app.post("/items/{item_id}/redact")
+    def post_redact(item_id: str, body: RedactIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.request_erasure(c, a, item_id, body.reason, body.terms, source="http")
+
+    @app.get("/items/{item_id}/erasures")
+    def get_erasures(item_id: str, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.erasures(c, a, item_id)
 
     @app.get("/search")
     def get_search(q: str, type: str | None = None, limit: int = 10, a: Actor = Depends(actor), c: Conn = Depends(conn)):

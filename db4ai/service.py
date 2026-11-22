@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from . import datasets, harness, store
+from . import datasets, erasure, harness, store
 from .auth import Actor, team_id_by_name
 from .db import Conn, Provenance, transaction
 from .embeddings import get_embedder
@@ -50,6 +50,17 @@ def revert(conn: Conn, actor: Actor, item_id: str, to_version: int, reason: str 
     prov = Provenance(actor.id, source, reason or f"revert to v{to_version}")
     with transaction(conn, prov):
         return jsonable(store.revert(conn, actor, prov, UUID(item_id), to_version))
+
+
+def request_erasure(conn: Conn, actor: Actor, item_id: str, reason: str, terms: list[str] | None = None,
+                    source: str = "api") -> dict:
+    """Queue an erasure (no terms) or redaction (terms) for an admin to approve in the harness."""
+    with transaction(conn):
+        return jsonable(erasure.request(conn, actor, UUID(item_id), reason=reason, terms=terms, source=source))
+
+
+def erasures(conn: Conn, actor: Actor, item_id: str) -> list[dict]:
+    return jsonable(erasure.erasures(conn, actor, UUID(item_id)))
 
 
 def pending(conn: Conn, actor: Actor, status: str = "pending") -> list[dict]:

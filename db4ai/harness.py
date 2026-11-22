@@ -23,6 +23,10 @@ class HarnessError(Exception):
     pass
 
 
+# Always ask_first whatever the policies table says, and only admins may decide them.
+ADMIN_ONLY = frozenset({"erase_item", "redact_item"})
+
+
 @dataclass(frozen=True)
 class Tier:
     tier: str
@@ -41,6 +45,8 @@ def resolve_tier(conn: Conn, action_type: str, team_id: UUID | None, confidence:
     ).fetchone()
     if row is None:
         return Tier("ask_first", 0, 14)  # fail closed
+    if action_type in ADMIN_ONLY:
+        return Tier("ask_first", 0, row["expires_after_days"])
     tier = row["tier"]
     if tier != "ask_first" and row["min_confidence"] is not None and (confidence is None or confidence < row["min_confidence"]):
         tier = "ask_first"
@@ -129,6 +135,8 @@ def decide(conn: Conn, actor: Actor, decision_id: UUID, approve: bool, note: str
         d = _lock(conn, decision_id)
         if not actor.can_decide(d["team_id"]):
             raise AccessDenied(f"{actor.name} cannot decide for this scope")
+        if d["action_type"] in ADMIN_ONLY and not actor.is_admin:
+            raise AccessDenied(f"only an admin can decide {d['action_type']}")
         if d["status"] != "pending":
             raise HarnessError(f"decision is {d['status']}, not pending")
         expired = conn.execute("select %s::timestamptz < now() as x", (d["expires_at"],)).fetchone()["x"]
@@ -141,15 +149,19 @@ def decide(conn: Conn, actor: Actor, decision_id: UUID, approve: bool, note: str
             note = (note or "") + " [unknown action type: cannot be applied]"
         prov = Provenance(actor.id, "harness", note or d["reason"], decision_id)
         result = None
+        if edited_payload is not None:  # stored before applying, so the action sees (and may scrub) it
+            conn.execute("update harness_decisions set payload=%s where id=%s", (Jsonb(edited_payload), decision_id))
         if approve:
             payload = edited_payload if edited_payload is not None else d["payload"]
             result = _apply(conn, d, prov, payload)
+            # The action may have scrubbed the decision's own reason (redaction); log what is stored now.
+            stored = conn.execute("select reason from harness_decisions where id=%s", (decision_id,)).fetchone()
+            prov = Provenance(actor.id, "harness", note or stored["reason"], decision_id)
         status = "approved" if approve else "rejected"
         conn.execute(
-            "update harness_decisions set status=%s, decided_by=%s, decided_at=now(), decision_note=%s,"
-            " result=%s, payload = coalesce(%s, payload) where id=%s",
-            (status, actor.id, note, Jsonb(result) if result is not None else None,
-             Jsonb(edited_payload) if edited_payload is not None else None, decision_id),
+            "update harness_decisions set status=%s, decided_by=%s, decided_at=now(), result=%s,"
+            " decision_note=%s where id=%s",
+            (status, actor.id, Jsonb(result) if result is not None else None, note, decision_id),
         )
         log_change(conn, prov, "harness", str(decision_id), "decide",
                    before={"status": "pending"}, after={"status": status, "edited": edited_payload is not None})

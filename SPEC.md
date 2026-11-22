@@ -37,6 +37,16 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
 - Each version records `actor`, `source`, `reason`, and `harness_decision_id` if a human approved it.
 - Status (active / archived / merged) is part of the version, so archiving and merging are also just new versions.
 - Revert = new version that copies an earlier one.
+- **Erasure / redaction** (`erase_item`, `redact_item`) is the only sanctioned bypass of the append-only triggers.
+  Both are always `ask_first` (whatever `policies` says) and only an admin can approve them; neither can be reverted.
+  While the approved decision is applied, the triggers let the content columns (title, body, metadata, blob,
+  content hash, reason) of *that decision's item* change, plus the content of its `change_log` rows and of rows
+  written under decisions that mention it. Ids, version numbers, actors, sources and timestamps never change, and
+  rows are never deleted. Erase scrubs every version, adds a final `erased` version (which accepts no more writes),
+  hashes the external key so a re-import is skipped, drops embeddings and chunks, and deletes blobs no other item
+  uses (row in the transaction, file via a `blob_delete` outbox job). Redact replaces terms (case-insensitive) with
+  `[redacted]` in the same places and re-enriches. Each writes an `erasures` tombstone (kind, counts, requester,
+  approver, reason) that never holds the erased content.
 - Structured datasets are real tables in the `data` schema. A row-level trigger writes every
   change to the shared append-only `change_log` with the same actor/source/reason fields.
 
@@ -54,7 +64,7 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
 |---|---|---|
 | `auto` | apply now, logged | `enrich`, `add_tags`, `add_link`, `set_summary`, `set_entities` |
 | `auto_notice` | apply now; a human can revert within N days | `mark_stale`, `merge_items` (confidence ≥ threshold) |
-| `ask_first` | queued in the harness; nothing happens until approved | `archive_item`, `promote_schema`, `merge_items` (low confidence), `resolve_contradiction`, `change_access`, **any unknown action** |
+| `ask_first` | queued in the harness; nothing happens until approved | `archive_item`, `promote_schema`, `merge_items` (low confidence), `resolve_contradiction`, `change_access`, `erase_item` and `redact_item` (always; admin-only), **any unknown action** |
 
 Tiers come from the `policies` table (per team, with a global default). The AI never picks a tier.
 
@@ -67,11 +77,12 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   and the HTTP API. Slack/Teams notifications are v1.1.
 
 ## 6. Ingestion (push-based)
-- MCP write tools: `save_meeting`, `save_document`, `remember`, `log_decision`, `search`, `get_item`, `history`, `revert`.
+- MCP write tools: `save_meeting`, `save_document`, `remember`, `log_decision`, `search`, `get_item`, `history`, `revert`,
+  `request_erasure`, `request_redaction`.
 - CLI import of files/folders: md, txt, pdf, docx → items; csv → structured dataset.
 - Memory repo import: Markdown/Obsidian vault (frontmatter → metadata, `[[wikilinks]]` → links);
   re-import only adds versions for changed files.
-- `POST /items` HTTP endpoint.
+- `POST /items` HTTP endpoint; `POST /items/{id}/erase`, `POST /items/{id}/redact` and `GET /items/{id}/erasures`.
 - External connectors (Drive, Zoom, Notion, Miro, Slack) are v1.1, built on `POST /items`.
 
 ## 7. Stack

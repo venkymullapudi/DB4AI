@@ -195,9 +195,20 @@ def hygiene(ctx: Context, payload: dict) -> Commit | None:
     return commit
 
 
+def blob_delete(ctx: Context, payload: dict) -> Commit | None:
+    """Delete an erased item's blob file once its row is gone (queued by erasure, after the row delete commits)."""
+    sha = payload["sha256"]
+    if ctx.blobs is None:
+        raise RuntimeError("no blob store configured; cannot delete erased blob")
+    if ctx.conn.execute("select 1 from blobs where sha256 = %s", (sha,)).fetchone() is None:
+        ctx.blobs.delete(sha)  # idempotent; if a later upload re-registered the same bytes, keep them
+    return None
+
+
 HANDLERS: dict[str, Callable[[Context, dict], Commit | None]] = {
     "enrich": enrich,
     "relate": relate,
     "schema_scan": schema_scan,
     "hygiene": hygiene,
+    "blob_delete": blob_delete,
 }

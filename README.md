@@ -12,6 +12,11 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   under their content hash *before* the row that references them commits, so a row never points at a missing blob.
 - **Nothing is overwritten.** Every edit is a new version that records who made it (a human or an agent),
   where it came from and why. Database triggers block `UPDATE`/`DELETE` on history. Undo is a new version.
+- **Erasure and redaction.** The one exception to append-only: an admin-approved harness decision can erase an
+  item's content from every version, blob, embedding, audit row and related decision (`POST /items/{id}/erase`), or
+  replace chosen terms with `[redacted]` everywhere (`POST /items/{id}/redact`). Anyone who can read the item can
+  ask; only an admin can approve. Ids, version numbers and provenance stay, and a tombstone
+  (`GET /items/{id}/erasures`) records what kind of erasure it was, who asked, who approved and why.
 - **Self-maintenance.** Background maintainers enrich items (summary, tags, entities, embeddings), link related
   items, merge near-duplicates, mark memories stale when newer items contradict them, propose turning
   recurring metadata into real tables, and clean up after themselves.
@@ -21,7 +26,8 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
 - **AIDBHarness.** Approving a decision applies the change in the same transaction. Rejections are
   remembered, and expired decisions are never applied. You can answer from Claude (MCP), the web page or the HTTP API.
 - **Built for Claude.** An MCP server with `save_meeting`, `save_document`, `remember`, `log_decision`, `search`,
-  `get_item`, `history`, `revert`, `dataset`, `harness_list_pending`, `harness_decide` and `harness_revert`.
+  `get_item`, `history`, `revert`, `dataset`, `request_erasure`, `request_redaction`, `harness_list_pending`,
+  `harness_decide` and `harness_revert`.
 - **Ingestion.** A CLI imports Markdown/Obsidian vaults (frontmatter becomes metadata, `[[wikilinks]]` become links),
   md/txt/pdf/docx files, and CSV files (which become BI tables in the `data` schema). There is also `POST /items`.
 - **BI-ready.** Structured data lives in real tables (`data.<team>_<name>`), so Tableau, Metabase and others connect directly.

@@ -106,6 +106,23 @@ def revert(item_id: str, to_version: int, reason: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def request_erasure(item_id: str, reason: str) -> dict[str, Any]:
+    """Ask an admin to erase an item's content from every version (e.g. a GDPR or legal request).
+
+    Nothing changes until an admin approves it in the AIDBHarness; a tombstone records who asked and why.
+    """
+    c, a = _ctx()
+    return service.request_erasure(c, a, item_id, reason, source=SOURCE)
+
+
+@mcp.tool()
+def request_redaction(item_id: str, terms: list[str], reason: str) -> dict[str, Any]:
+    """Ask an admin to replace `terms` (case-insensitive) with [redacted] in every version of an item."""
+    c, a = _ctx()
+    return service.request_erasure(c, a, item_id, reason, terms, source=SOURCE)
+
+
+@mcp.tool()
 def dataset(name: str, team: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
     """Read rows from a structured dataset (also queryable by BI tools as data.<table>)."""
     c, a = _ctx()
