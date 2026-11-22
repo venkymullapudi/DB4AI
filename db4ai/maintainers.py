@@ -205,10 +205,27 @@ def blob_delete(ctx: Context, payload: dict) -> Commit | None:
     return None
 
 
+def notify(ctx: Context, payload: dict) -> Commit | None:
+    """Send pending harness decisions to one webhook (queued by `harness.propose`), then record what was sent."""
+    from . import notify as notifications
+    webhook = payload["webhook"]
+    sent = notifications.send(ctx.conn, webhook)
+    if not sent:
+        return None
+
+    def commit(conn: Conn) -> dict:
+        for d in sent:
+            conn.execute("insert into notifications (decision_id, webhook) values (%s, %s)"
+                         " on conflict do nothing", (d["id"], webhook))
+        return {"sent": len(sent)}
+    return commit
+
+
 HANDLERS: dict[str, Callable[[Context, dict], Commit | None]] = {
     "enrich": enrich,
     "relate": relate,
     "schema_scan": schema_scan,
     "hygiene": hygiene,
     "blob_delete": blob_delete,
+    "notify": notify,
 }

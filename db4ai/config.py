@@ -27,6 +27,13 @@ class Settings:
     # Vector search first takes this many nearest rows (HNSW with pgvector), then applies team/type filters;
     # if too few results survive it falls back to an exact scan. Capped at 1000 (pgvector's ef_search limit).
     vector_candidates: int = field(default_factory=lambda: int(_env("DB4AI_VECTOR_CANDIDATES", "200")))
+    # Notifications for pending harness decisions: comma-separated webhook URLs, optionally prefixed
+    # `slack:` (default, {"text": ...}) or `teams:` (Adaptive Card for a Teams Workflows webhook).
+    notify_webhooks: str | None = field(default_factory=lambda: _env("DB4AI_NOTIFY_WEBHOOKS"))
+    # Wait this long after a proposal before sending, so a burst becomes one message.
+    notify_delay_seconds: float = field(default_factory=lambda: float(_env("DB4AI_NOTIFY_DELAY_SECONDS", "60")))
+    # Base URL of the web UI, for the review link in notifications.
+    public_url: str | None = field(default_factory=lambda: _env("DB4AI_PUBLIC_URL"))
     # Maintainer thresholds
     link_threshold: float = field(default_factory=lambda: float(_env("DB4AI_LINK_THRESHOLD", "0.55")))
     dup_threshold: float = field(default_factory=lambda: float(_env("DB4AI_DUP_THRESHOLD", "0.92")))

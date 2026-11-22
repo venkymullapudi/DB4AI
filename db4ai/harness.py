@@ -14,6 +14,7 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
+from . import notify
 from .actions import REGISTRY
 from .auth import AccessDenied, Actor
 from .db import Conn, Provenance, log_change, set_provenance
@@ -116,6 +117,8 @@ def propose(conn: Conn, agent: Actor, action_type: str, payload: dict, *, reason
     if auto:
         result = _apply(conn, decision, prov, payload)
         conn.execute("update harness_decisions set result=%s where id=%s", (Jsonb(result), decision["id"]))
+    else:
+        notify.queue(conn)  # outbox: a notification job exists iff this pending decision commits
     log_change(conn, prov, "harness", str(decision["id"]), "propose",
                after={"action": action_type, "tier": tier.tier, "status": decision["status"]})
     return {"decision_id": decision["id"], "status": decision["status"], "tier": tier.tier, "skipped": False}

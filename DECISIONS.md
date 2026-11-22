@@ -204,3 +204,28 @@ with (or after) CI against `pgvector/pgvector:pg16`.
 - **Q: Surfaces?** MCP tool `ask(question, type, limit)` and `POST /ask {question, type, limit}` (POST because questions
   can be long and shouldn't sit in URLs or access logs). Empty or >2000-character questions are a 400.
 - **Not owner-level:** read-only, no new services; Claude is used only where it already is (configured credentials).
+
+## 2026-11-22 — notifications for pending harness decisions
+- **Q: Which decisions notify?** Only new `pending` ones (ask_first). Auto and auto_notice decisions are already
+  applied and visible in `/harness`; notifying them would be noise.
+- **Q: How is delivery tied to the decision?** Outbox: `propose` queues a `notify` job in the same transaction, so a
+  notification exists iff the decision committed. Only when webhooks are configured (no idle jobs otherwise).
+- **Q: One message per decision?** No: an erasure can propose 100 copy redactions at once. Jobs are deduped per
+  webhook (`notify:<webhook id>`) and delayed `DB4AI_NOTIFY_DELAY_SECONDS` (default 60), and the job sends one
+  message naming every decision still pending, unexpired and not yet sent to that webhook (20 listed, rest counted).
+- **Q: How do we know what was sent?** A `notifications` table (decision id, webhook id, sent_at), written in the job's
+  commit after the POST succeeds. A crash between POST and commit resends (at-least-once); a failed POST is retried
+  by the queue's backoff and records nothing. Decisions decided or expired before the job runs are not named.
+- **Q: What goes in the message?** No content: action type, team, confidence, proposer, expiry, decision id and a
+  link to `/harness` (`DB4AI_PUBLIC_URL`). Not reason, diff, payload or evidence: those can quote item text (and
+  redaction terms), and a Slack/Teams message can't be scrubbed by erasure. The `notifications` table holds ids only,
+  so erasure has nothing to scrub there.
+- **Q: Where are webhooks configured?** `DB4AI_NOTIFY_WEBHOOKS`, comma-separated, because webhook URLs are secrets and
+  shouldn't sit in the database. The DB stores a 16-char sha256 id of each URL; a job whose webhook was removed from
+  config is a no-op. Format: `{"text": ...}` (Slack, and legacy Teams connectors) by default; `teams:` prefix sends an
+  Adaptive Card for Teams Workflows webhooks.
+- **Q: Per-team channels?** Out of scope: every webhook gets every pending decision. Added to ROADMAP as "Per-team
+  notification routing".
+- **Not owner-level:** no paid services or accounts (the owner supplies a webhook URL if they want it); off by default;
+  the migration only adds a table.
+

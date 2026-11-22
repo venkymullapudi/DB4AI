@@ -79,7 +79,14 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
 - **Approve applies the change in the same transaction** that records the decision.
   Expired decisions are **not** applied. Rejections are remembered (fingerprint), so the same proposal isn't made again.
 - Surfaces: MCP tools (`harness_list_pending`, `harness_decide`), a minimal web page (`/harness`),
-  and the HTTP API. Slack/Teams notifications are v1.1.
+  and the HTTP API.
+- **Notifications** (Slack/Teams incoming webhooks, `DB4AI_NOTIFY_WEBHOOKS`): a new pending decision queues one
+  `notify` outbox job per webhook in the proposing transaction (deduped per webhook, delayed
+  `DB4AI_NOTIFY_DELAY_SECONDS` so a burst becomes one message). The job names the decisions still pending, unexpired
+  and not yet sent to that webhook, and records them in `notifications` (ids only) after the POST succeeds; a failed
+  POST retries with the queue's backoff (at-least-once). Messages carry action type, team, confidence, proposer,
+  expiry, decision id and a review link (`DB4AI_PUBLIC_URL`), never item content, reasons or diffs, since a chat
+  message can't be erased later.
 
 ## 6. Ingestion (push-based)
 - MCP write tools: `save_meeting`, `save_document`, `remember`, `log_decision`, `search`, `get_item`, `history`, `revert`,

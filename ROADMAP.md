@@ -30,11 +30,13 @@ right priority, with a one-line reason.
 
 ## Next: get real data flowing in
 
-- [ ] Notifications for pending harness decisions (Slack/Teams webhook, via an outbox job).
+- [x] Notifications for pending harness decisions (Slack/Teams webhook, via an outbox job).
 - [ ] Connector framework on top of `POST /items` (incremental sync cursor per source), then the first
       connectors: Google Drive/Docs, meeting transcripts.
 - [ ] **`ask` follow-ups.** Optional audit log of questions asked (who asked what, which items were cited), and
       multi-turn context. Why: v1 `ask` is stateless and leaves no trace of what was read.
+- [ ] **Per-team notification routing.** Send a team's pending decisions to that team's channel (webhook URLs are
+      secrets, so map team → env name, not URL, in the DB). Why: v1 sends every decision to every webhook.
 - [ ] "As of" queries: read any item or search results as they were at a given time.
 
 ## Later
