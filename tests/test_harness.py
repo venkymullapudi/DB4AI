@@ -163,3 +163,45 @@ def test_promote_schema_creates_bi_table_with_change_capture(world):
     assert [x["duration_min"] for x in rows] == [15, 16, 17]
     log = w.conn.execute("select actor_id, harness_decision_id from change_log where entity='data.eng_meeting_fields'").fetchall()
     assert len(log) == 3 and all(l["harness_decision_id"] == r["decision_id"] for l in log)
+
+
+def test_enrich_applies_all_fields_in_one_version_and_reverts(world):
+    w = world
+    i = item(w)
+    propose(w, "add_tags", {"item_id": str(i), "value": ["old"]}, 1.0)
+    before = store.get_item(w.conn, w.alice, i)
+    r = propose(w, "enrich", {"item_id": str(i), "summary": "Acme renews in March.", "tags": ["acme"],
+                              "entities": ["Acme"], "for_version": before["version"]}, 1.0)
+    assert (r["tier"], r["status"]) == ("auto", "applied_auto")
+    cur = store.get_item(w.conn, w.alice, i)
+    assert cur["version"] == before["version"] + 1
+    assert cur["metadata"]["ai"]["tags"] == ["acme", "old"]  # tags are merged, not replaced
+    assert cur["metadata"]["ai"]["summary"] == "Acme renews in March."
+    assert cur["metadata"]["ai"]["entities"] == ["Acme"]
+    d = w.conn.execute("select diff from harness_decisions where id=%s", (r["decision_id"],)).fetchone()["diff"]
+    assert d["summary"]["after"] == "Acme renews in March." and d["tags"]["before"] == ["old"]
+    harness.revert(w.conn, w.root, r["decision_id"])
+    assert store.get_item(w.conn, w.alice, i)["metadata"]["ai"] == before["metadata"]["ai"]
+
+
+def test_enrich_ask_first_waits_and_approve_applies(world):
+    w = world
+    harness.set_policy(w.conn, w.alice, "enrich", "ask_first", team_id=w.eng)
+    i = item(w)
+    r = propose(w, "enrich", {"item_id": str(i), "summary": "s", "for_version": 1}, 1.0)
+    assert r["status"] == "pending" and "ai" not in store.get_item(w.conn, w.alice, i)["metadata"]
+    harness.decide(w.conn, w.alice, r["decision_id"], True)
+    assert store.get_item(w.conn, w.alice, i)["metadata"]["ai"]["summary"] == "s"
+
+
+def test_migration_carries_team_overrides_to_enrich(world):
+    from importlib.resources import files
+    w = world
+    harness.set_policy(w.conn, w.alice, "add_tags", "auto_notice", team_id=w.eng)
+    harness.set_policy(w.conn, w.alice, "set_summary", "ask_first", team_id=w.eng)
+    harness.set_policy(w.conn, w.root, "set_entities", "auto", team_id=w.sales)
+    w.conn.execute("delete from policies where action_type='enrich'")
+    w.conn.execute((files("db4ai.migrations") / "005_enrich_action.sql").read_text())
+    assert harness.resolve_tier(w.conn, "enrich", w.eng, 1.0).tier == "ask_first"   # strictest wins
+    assert harness.resolve_tier(w.conn, "enrich", w.sales, 1.0).tier == "auto"
+    assert harness.resolve_tier(w.conn, "enrich", None, 1.0).tier == "auto"

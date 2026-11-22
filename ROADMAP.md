@@ -16,7 +16,7 @@ right priority, with a one-line reason.
 - [x] **Vector index.** Set fixed embedding dimensions per model so pgvector can use an HNSW index (keep the
       `float8[]` fallback) on `item_chunks` and `item_embeddings`. Needs pgvector in tests, so do it with or
       after CI. Why: chunk search is a sequential scan today.
-- [ ] **One version per enrichment.** Combine summary, tags and entities into a single `enrich` action and
+- [x] **One version per enrichment.** Combine summary, tags and entities into a single `enrich` action and
       version. Why: each enrichment adds 3 versions today.
 - [ ] **Redaction and erasure via the AIDBHarness.** Always `ask_first` and admin-approved. Scrub the content
       from every version and blob while keeping a tombstone saying what was erased, by whom and why.

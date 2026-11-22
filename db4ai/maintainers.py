@@ -56,11 +56,11 @@ def enrich(ctx: Context, payload: dict) -> Commit | None:
         agent = ctx.agent
         latest = conn.execute("select max(version) v from item_versions where item_id=%s", (item_id,)).fetchone()["v"]
         why = f"enrichment of v{cur['version']} by {ctx.llm.name}"
-        for action, value in (("set_summary", result.summary), ("add_tags", result.tags),
-                              ("set_entities", result.entities)):
-            if value:
-                harness.propose(conn, agent, action, {"item_id": str(item_id), "value": value,
-                                                      "for_version": cur["version"]}, reason=why, confidence=1.0)
+        fields = {"summary": result.summary, "tags": result.tags, "entities": result.entities}
+        fields = {k: v for k, v in fields.items() if v}
+        if fields:  # one harness decision and one version for the whole enrichment
+            harness.propose(conn, agent, "enrich", {"item_id": str(item_id), **fields,
+                                                    "for_version": cur["version"]}, reason=why, confidence=1.0)
         store.put_embedding(conn, item_id, ctx.embedder.name, latest, vec)
         store.put_chunks(conn, item_id, ctx.embedder.name, cur["version"], cur["content_hash"], spans, chunk_vecs)
         store.enqueue(conn, "relate", {"item_id": str(item_id)}, dedupe_key=f"relate:{item_id}")

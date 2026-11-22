@@ -107,3 +107,19 @@ def test_hygiene_removes_orphan_blobs_and_expires_decisions(world):
     out = commit(w.conn)
     assert out["expired"] == 1
     assert gc_orphans(w.conn, w.blobs, grace_seconds=0) == ["deadbeef" * 8]
+
+
+def test_enrichment_is_one_version_and_one_decision(world):
+    w = world
+    i = save(w, "Q3 pricing review", "We reviewed enterprise pricing with Priya Shah. Enterprise pricing rises 10% in Q3.")
+    run_until_idle(w.ctx)
+    hist = store.history(w.conn, w.alice, i)
+    enriched = [v for v in hist if v["actor_kind"] == "agent"]
+    assert len(hist) == 2 and len(enriched) == 1
+    ai = store.get_item(w.conn, w.alice, i)["metadata"]["ai"]
+    assert ai["summary"] and ai["tags"] and ai["entities"] and ai["enriched_version"] == 1
+    ds = decisions(w, "enrich")
+    assert len(ds) == 1 and ds[0]["status"] == "applied_auto"
+    assert set(ds[0]["payload"]) >= {"summary", "tags", "entities", "for_version"}
+    assert not [d for d in decisions(w) if d["action_type"] in ("add_tags", "set_summary", "set_entities")]
+    assert enriched[0]["harness_decision_id"] is not None

@@ -49,15 +49,38 @@ def _meta_action(field: str) -> Action:
     def apply(conn, prov, p):
         cur = _cur(conn, p["item_id"])
         ai = dict(cur["metadata"].get("ai", {}))
-        value = p["value"]
-        if field == "tags":
-            value = sorted(set(ai.get("tags", [])) | set(value))
-        ai[field] = value
+        ai[field] = _merge_ai(ai, field, p["value"])
         ai["enriched_version"] = p.get("for_version", cur["version"])
         r = store.new_version(conn, prov, p["item_id"], metadata_patch={"ai": ai})
         return {"versions": {str(p["item_id"]): cur["version"]}, "new_version": r["version"]}
 
     return Action(_team_of_item("item_id"), diff, apply, _revert_versions)
+
+
+ENRICH_FIELDS = ("summary", "tags", "entities")
+
+
+def _merge_ai(ai: dict, field: str, value):
+    return sorted(set(ai.get("tags", [])) | set(value)) if field == "tags" else value
+
+
+def _enrich_diff(conn, p):
+    cur = _cur(conn, p["item_id"])
+    ai = cur["metadata"].get("ai", {})
+    return {"item": p["item_id"], "title": cur["title"],
+            **{f: {"before": ai.get(f), "after": p[f]} for f in ENRICH_FIELDS if p.get(f)}}
+
+
+def _enrich_apply(conn, prov, p):
+    """summary + tags + entities in one new version (one version per enrichment)."""
+    cur = _cur(conn, p["item_id"])
+    ai = dict(cur["metadata"].get("ai", {}))
+    for f in ENRICH_FIELDS:
+        if p.get(f):
+            ai[f] = _merge_ai(ai, f, p[f])
+    ai["enriched_version"] = p.get("for_version", cur["version"])
+    r = store.new_version(conn, prov, p["item_id"], metadata_patch={"ai": ai})
+    return {"versions": {str(p["item_id"]): cur["version"]}, "new_version": r["version"]}
 
 
 def _revert_versions(conn: Conn, prov: Provenance, result: dict) -> None:
@@ -160,6 +183,7 @@ def _access_apply(conn, prov, p):
 
 
 REGISTRY: dict[str, Action] = {
+    "enrich": Action(_team_of_item("item_id"), _enrich_diff, _enrich_apply, _revert_versions),
     "add_tags": _meta_action("tags"),
     "set_summary": _meta_action("summary"),
     "set_entities": _meta_action("entities"),

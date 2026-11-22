@@ -41,7 +41,8 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
   change to the shared append-only `change_log` with the same actor/source/reason fields.
 
 ## 4. Self-maintenance — six maintainer jobs
-1. **enrich** — summary, tags, entities, embedding for new/changed content.
+1. **enrich** — summary, tags, entities, embedding for new/changed content. Summary, tags and entities are
+   applied by one `enrich` action, so each enrichment is one harness decision and one new version.
 2. **link** — connect related items (embedding similarity + shared entities, Obsidian wikilinks).
 3. **dedup** — near-duplicate items → propose merge.
 4. **staleness** — newer items contradicting older memories → propose mark-stale.
@@ -51,7 +52,7 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
 ### Risk tiers (policy-driven, fail closed)
 | tier | behaviour | default action types |
 |---|---|---|
-| `auto` | apply now, logged | `add_tags`, `add_link`, `set_summary`, `set_entities` |
+| `auto` | apply now, logged | `enrich`, `add_tags`, `add_link`, `set_summary`, `set_entities` |
 | `auto_notice` | apply now; a human can revert within N days | `mark_stale`, `merge_items` (confidence ≥ threshold) |
 | `ask_first` | queued in the harness; nothing happens until approved | `archive_item`, `promote_schema`, `merge_items` (low confidence), `resolve_contradiction`, `change_access`, **any unknown action** |
 

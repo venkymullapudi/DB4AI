@@ -96,3 +96,19 @@ with (or after) CI against `pgvector/pgvector:pg16`.
   instead of `<=>`, the rest of the query (and the fallback logic) is shared, so local tests exercise it.
 - **Not verified locally:** no pgvector here, so the HNSW index creation and the `EXPLAIN` test that checks the
   index is used run for the first time in CI (`pgvector/pgvector:pg16`).
+
+## 2026-11-22 — one version per enrichment
+- **Q: New action or batch the three existing ones into one version?** A new registered action `enrich` with
+  payload `{item_id, summary?, tags?, entities?, for_version}`. One harness decision, one `new_version`, one diff
+  showing before/after per field, and one revert. Batching three decisions into one version would leave three
+  decisions pointing at one version and make per-decision revert ambiguous.
+- **Q: Keep `add_tags` / `set_summary` / `set_entities`?** Yes. Existing harness decisions reference them (revert
+  must still work) and they are useful for single-field edits. The maintainer just stops proposing them.
+- **Q: What tier does `enrich` get?** Its own policy row, global `auto` (migration `005_enrich_action.sql`), same as
+  the three it replaces. Any team that had overridden one of the three gets a team `enrich` row with the
+  **strictest** of its overrides (fail closed), so a team that made `set_summary` ask_first doesn't silently get
+  auto enrichment. Later changes to the per-field policies do not affect `enrich`; set the `enrich` policy instead.
+- **Q: Empty fields?** Omitted from the payload; if all three are empty, nothing is proposed (no empty version).
+- **Q: Tags merge or replace?** Merge with existing tags, as `add_tags` did (shared `_merge_ai` helper).
+- **Q: Rejection fingerprint?** Unchanged mechanism: the fingerprint covers the whole payload minus
+  `for_version`, so a rejected enrichment isn't re-proposed with identical values.
