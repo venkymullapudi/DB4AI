@@ -31,8 +31,12 @@ right priority, with a one-line reason.
 ## Next: get real data flowing in
 
 - [x] Notifications for pending harness decisions (Slack/Teams webhook, via an outbox job).
-- [ ] Connector framework on top of `POST /items` (incremental sync cursor per source), then the first
-      connectors: Google Drive/Docs, meeting transcripts.
+- [x] Connector framework on top of `POST /items` (incremental sync cursor per source), plus the first connector:
+      meeting transcripts from a folder (.vtt/.srt/.txt).
+- [ ] **Google Drive/Docs connector** on the connector framework (Drive changes API page token as the cursor,
+      Docs exported as text, OAuth token supplied by the owner via env). Why: split from the connector item.
+- [ ] **Source deletions in connectors.** A record the source deleted proposes `archive_item` (ask_first) instead of
+      being ignored. Why: v1 sync only upserts, so deleted Drive files would live on.
 - [ ] **`ask` follow-ups.** Optional audit log of questions asked (who asked what, which items were cited), and
       multi-turn context. Why: v1 `ask` is stateless and leaves no trace of what was read.
 - [ ] **Per-team notification routing.** Send a team's pending decisions to that team's channel (webhook URLs are

@@ -229,3 +229,30 @@ with (or after) CI against `pgvector/pgvector:pg16`.
 - **Not owner-level:** no paid services or accounts (the owner supplies a webhook URL if they want it); off by default;
   the migration only adds a table.
 
+
+## 2026-11-22 — connector framework + meeting transcripts connector
+- **Q: Scope for one run?** Split the roadmap item: the framework and a local transcripts connector now; Google Drive
+  (needs an OAuth token from the owner, mocked in tests) is its own roadmap item next.
+- **Q: Where does a connector run?** Both in-process (`connectors.run`, used by `db4ai sync`) and elsewhere over HTTP
+  (`POST /sync/{source}`). Both go through one function, `apply_batch`, which saves records with the same
+  `store.save_item` path as `POST /items`.
+- **Q: How is the cursor kept consistent with the items?** `sync_cursors` (source, team) row moved in the same
+  transaction as the batch's items, so a crash never skips a batch. Compare-and-set on `expected_cursor` (row locked
+  `for update`): if another sync moved it, nothing is written and the caller gets a 409. Every move is in `change_log`.
+- **Q: Mutable table vs append-only?** The cursor is mutable state like `item_heads`, not company data; history lives
+  in `change_log`. It is opaque text that must never hold content, so erasure has nothing to scrub.
+- **Q: External keys?** `<source>:<key>`, because `external_key` is unique per (team, type) and two sources (or a file
+  import) can share a key like `notes.txt`. Provenance source is `connector:<source>`.
+- **Q: Who may sync?** Any actor who can write to the team (same as `POST /items`). Source names are
+  `[a-z0-9][a-z0-9_.-]{0,63}` (checked in code and by a table constraint).
+- **Q: Batch size?** At most 500 records per batch (bounded transaction); a bad record rolls back the whole batch,
+  cursor included.
+- **Q: Erased items?** `save_item` already skips withheld keys, so a re-sync can't resurrect them; counted as `erased`.
+- **Q: Deletions in the source?** Out of scope: v1 only upserts. Added to ROADMAP ("Source deletions in connectors",
+  proposing `archive_item`, ask_first).
+- **Q: Transcripts connector shape?** A folder of `.vtt`/`.srt`/`.txt` (where Zoom/Meet/Teams exports land, no
+  account needed). Body = "Speaker: text" paragraphs (consecutive cues by the same speaker merged, timing/cue numbers/
+  NOTE blocks/markup dropped); metadata `format`, `speakers`, `duration_seconds` (last cue end), `path`; type `meeting`,
+  title = file stem; hidden paths skipped. Cursor = newest mtime (ns) synced; files at exactly that mtime are re-sent
+  (idempotent) so a file written in the same tick isn't missed.
+- **Not owner-level:** no external services or accounts; the migration only adds a table.

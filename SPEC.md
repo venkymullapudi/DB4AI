@@ -101,7 +101,15 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
 - Memory repo import: Markdown/Obsidian vault (frontmatter → metadata, `[[wikilinks]]` → links);
   re-import only adds versions for changed files.
 - `POST /items` HTTP endpoint; `POST /items/{id}/erase`, `POST /items/{id}/redact` and `GET /items/{id}/erasures`.
-- External connectors (Drive, Zoom, Notion, Miro, Slack) are v1.1, built on `POST /items`.
+- **Connectors** (incremental sync): a connector yields batches of records (key, type, title, body, metadata) and the
+  cursor reached after each. A batch is saved like `POST /items` (external key `<source>:<key>`, provenance source
+  `connector:<source>`) and the `sync_cursors` row for (source, team) moves in the same transaction, compare-and-set
+  on the previous cursor (mismatch → 409 / `CursorConflict`, nothing written). At most 500 records per batch; every
+  cursor move is in `change_log`. Cursors are opaque and never hold content. Re-sending is idempotent, and an erased
+  item's key is withheld, so a sync can't bring it back. Surfaces: `POST /sync/{source}`, `GET /sync/{source}/cursor`,
+  `db4ai sync <connector> <path>`. Built in: `transcripts` (a folder of `.vtt`/`.srt`/`.txt` → `meeting` items with
+  `speakers`, `duration_seconds`, `path`; cursor = newest mtime synced, files at that mtime are re-sent).
+- More connectors (Drive, Notion, Miro, Slack) build on the same framework.
 
 ## 7. Stack
 Python ≥3.11, FastAPI, psycopg 3 with plain SQL and a small SQL migration runner, pgvector,

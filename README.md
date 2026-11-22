@@ -34,6 +34,11 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   `harness_decide` and `harness_revert`.
 - **Ingestion.** A CLI imports Markdown/Obsidian vaults (frontmatter becomes metadata, `[[wikilinks]]` become links),
   md/txt/pdf/docx files, and CSV files (which become BI tables in the `data` schema). There is also `POST /items`.
+- **Connectors with incremental sync.** `db4ai sync transcripts <folder> --team eng` turns meeting transcripts
+  (`.vtt`, `.srt`, `.txt`, e.g. a Zoom/Meet/Teams export folder) into `meeting` items with speakers and duration,
+  and only reads files newer than its cursor on the next run. Connectors that run elsewhere push batches to
+  `POST /sync/{source}` (`items`, `cursor`, `expected_cursor`) and read `GET /sync/{source}/cursor`: the items and the
+  cursor commit together, and a stale `expected_cursor` is a 409, so no batch is skipped or applied twice.
 - **BI-ready.** Structured data lives in real tables (`data.<team>_<name>`), so Tableau, Metabase and others connect directly.
   A trigger records every row change in the append-only `change_log`.
 
@@ -107,5 +112,5 @@ deployment, writes an item over HTTP, runs the maintainers and searches for it. 
 
 ## Not in v1
 
-Connectors for Google Drive, Zoom/Meet, Notion, Miro and Slack (they will build on `POST /items`),
-Slack/Teams notifications for pending decisions, and bitemporal "as of" queries.
+Connectors for Google Drive, Notion, Miro and Slack (they will build on `POST /sync/{source}`), and bitemporal
+"as of" queries.

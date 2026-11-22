@@ -51,6 +51,13 @@ def main(argv: list[str] | None = None) -> None:
     i.add_argument("--type", default="document", help="item type for text files (default: document)")
     i.add_argument("--vault", action="store_true", help="treat as a Markdown/Obsidian memory vault")
 
+    sy = sub.add_parser("sync", help="incremental sync from a connector")
+    sy.add_argument("connector", choices=["transcripts"])
+    sy.add_argument("path", type=Path, help="folder the connector reads (transcripts: .vtt/.srt/.txt files)")
+    sy.add_argument("--team", required=True)
+    sy.add_argument("--as", dest="actor", help="actor name to attribute the sync to")
+    sy.add_argument("--source", help="cursor name (default: the connector name)")
+
     m = sub.add_parser("maintain", help="run maintainer jobs")
     m.add_argument("--once", action="store_true", help="drain the queue and exit")
 
@@ -98,6 +105,15 @@ def main(argv: list[str] | None = None) -> None:
         else:
             r = ingest.import_file(conn, actor, team_id, a.path, blobs=blobs, item_type=a.type)
         _out(r)
+    elif a.cmd == "sync":
+        from . import connectors
+
+        with conn.transaction():
+            actor = _actor(conn, a.actor)
+        team_id = auth.team_id_by_name(conn, a.team)
+        if not a.path.is_dir():
+            sys.exit(f"{a.path} is not a folder")
+        _out(connectors.run(conn, actor, a.source or a.connector, team_id, connectors.TranscriptFolder(a.path)))
     elif a.cmd == "maintain":
         from .maintainers import Context
         from .worker import run_forever, run_until_idle, schedule_periodic

@@ -17,6 +17,7 @@ from . import service
 from .auth import AccessDenied, Actor, actor_for_token
 from .config import settings
 from .db import Conn
+from .connectors import CursorConflict
 from .harness import HarnessError
 
 COOKIE = "db4ai_token"
@@ -46,6 +47,21 @@ class AskIn(BaseModel):
     question: str
     type: str | None = None
     limit: int = 8
+
+
+class SyncItemIn(BaseModel):
+    key: str
+    type: str
+    title: str
+    body: str = ""
+    metadata: dict = {}
+
+
+class SyncIn(BaseModel):
+    team: str | None = None
+    items: list[SyncItemIn] = []
+    cursor: str | None = None
+    expected_cursor: str | None = None
 
 
 class DecisionIn(BaseModel):
@@ -101,6 +117,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": str(exc)}, status_code=409)
 
+    @app.exception_handler(CursorConflict)
+    def _cursor(request: Request, exc: CursorConflict):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": str(exc)}, status_code=409)
+
     # ------------------------------------------------------------ JSON API
 
     @app.post("/items")
@@ -130,6 +151,15 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/items/{item_id}/erasures")
     def get_erasures(item_id: str, a: Actor = Depends(actor), c: Conn = Depends(conn)):
         return service.erasures(c, a, item_id)
+
+    @app.get("/sync/{source}/cursor")
+    def get_sync_cursor(source: str, team: str | None = None, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.sync_cursor(c, a, source, team)
+
+    @app.post("/sync/{source}")
+    def post_sync(source: str, body: SyncIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.sync_batch(c, a, source, items=[i.model_dump() for i in body.items], cursor=body.cursor,
+                                  expected_cursor=body.expected_cursor, team=body.team)
 
     @app.get("/search")
     def get_search(q: str, type: str | None = None, limit: int = 10, a: Actor = Depends(actor), c: Conn = Depends(conn)):

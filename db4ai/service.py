@@ -7,7 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from . import ask as ask_mod
-from . import datasets, erasure, harness, store
+from . import connectors, datasets, erasure, harness, store
 from .auth import Actor, team_id_by_name
 from .db import Conn, Provenance, transaction
 from .embeddings import get_embedder
@@ -34,6 +34,18 @@ def save(conn: Conn, actor: Actor, *, type: str, title: str, body: str = "", tea
         r = store.save_item(conn, actor, prov, team_id=tid, type=type, title=title, body=body,
                             metadata=metadata, external_key=external_key)
     return jsonable(r)
+
+
+def sync_cursor(conn: Conn, actor: Actor, source: str, team: str | None = None) -> dict:
+    return jsonable(connectors.get_cursor(conn, actor, source, resolve_team(conn, actor, team)))
+
+
+def sync_batch(conn: Conn, actor: Actor, source: str, *, items: list[dict], cursor: str | None,
+               expected_cursor: str | None, team: str | None = None) -> dict:
+    records = [connectors.Record(key=i["key"], type=i["type"], title=i["title"], body=i.get("body", ""),
+                                 metadata=i.get("metadata") or {}) for i in items]
+    return jsonable(connectors.apply_batch(conn, actor, source, resolve_team(conn, actor, team), records,
+                                           cursor, expected_cursor))
 
 
 def search(conn: Conn, actor: Actor, query: str, *, types: list[str] | None = None, limit: int = 10) -> list[dict]:
