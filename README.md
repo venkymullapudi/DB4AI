@@ -29,6 +29,7 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   remembered, and expired decisions are never applied. You can answer from Claude (MCP), the web page or the HTTP API.
 - **Answers with citations.** `ask` (MCP tool or `POST /ask`) answers a question from the items you can read and
   cites the item ids, versions and exact quotes it used; if nothing it can quote supports an answer, it says so.
+  Follow-ups pass the earlier turns as `history`, so "and who owns it?" knows what "it" is; only items are cited.
 - **Built for Claude.** An MCP server with `ask`, `save_meeting`, `save_document`, `remember`, `log_decision`, `search`,
   `get_item`, `history`, `revert`, `dataset`, `request_erasure`, `request_redaction`, `harness_list_pending`,
   `harness_decide` and `harness_revert`.

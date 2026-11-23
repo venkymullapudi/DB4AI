@@ -100,6 +100,13 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   (item id, version, title, quote) and the `sources` searched. Citations to passages it wasn't given are dropped;
   a quote not found verbatim in its passage is kept as `null`. Without at least one verbatim quote the answer is not
   returned (`answered: false`, fail closed). No versions or decisions are written.
+- **Follow-ups**: `ask` takes an optional `history` (earlier turns, oldest first: `question`, `answer`, `citations` with
+  `item_id`; ≤10 turns, questions ≤2000 and answers ≤4000 characters, ≤20 citations per turn, else a 400). The server
+  stores no conversation. History is context, never evidence: if the question alone finds fewer than `limit` items,
+  search is rerun with the previous question prepended to fill the rest, and up to 5 items cited in earlier turns
+  (newest first) are added as passages after re-reading them under the same access, active-only and type filters as
+  search (unreadable or unknown ids are dropped silently). The model sees the earlier turns marked as not citable;
+  the grounding rule is unchanged. `ask_log.history_turns` records how many turns were supplied, not their text.
 - **`ask` audit log** (opt-in, `DB4AI_ASK_LOG` = `off` default | `ids` | `text`; any other value makes `ask` fail):
   each call writes one append-only `ask_log` row in the answer's transaction (a failed write returns no answer):
   actor, time, `answered`, model, type filter, sources and citations as `(item_id, version)` pairs, and a sha256 of

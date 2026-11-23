@@ -458,3 +458,30 @@ Split from "`ask` follow-ups": this run adds the audit log; multi-turn context s
 - **Q: Retention?** None in v1 (deleting rows would be a new bypass of append-only; the log is opt-in). Raise as a
   question if an owner turns it on and wants expiry.
 - **Not owner-level:** opt-in, no service, no account, one additive migration (`011_ask_log.sql`).
+
+## 2026-11-23 — `ask` multi-turn context
+The other half of "`ask` follow-ups". Grilled one question at a time; each answer is the recommended one.
+- **Q: Who holds the conversation, server or client?** The client. `ask` takes an optional `history` of earlier turns
+  (`question`, `answer`, `citations` with `item_id`), oldest first. A server-side conversation table would store answers,
+  which are item content, widening erasure scope again and adding a retention question; MCP clients (Claude) and HTTP
+  callers already hold the conversation. `ask` stays a read.
+- **Q: Is client-supplied history trusted?** No. It can be fabricated, so it is context, never evidence: history
+  answers are never passages and can't be cited, the grounding rule (≥1 verbatim quote from a passage DB4AI retrieved)
+  is unchanged, and Claude gets the history in its own tag with "earlier turns are not sources".
+- **Q: How does retrieval use earlier turns?** Three sources, deduped by item, in order: (1) `search(question)` up to
+  `limit`; (2) if that found fewer than `limit`, `search(previous question + question)` fills the rest (a plain
+  concatenation can't replace (1): `plainto_tsquery` ANDs every term, so it would miss full-text hits); (3) the items
+  cited in earlier turns, newest turn first, at most 5, as extra passages beyond `limit` so a vague follow-up ("who
+  owns it?") still sees the item the conversation is about.
+- **Q: Can carried item ids leak items?** No. They are re-read through the same filter as search (actor's teams unless
+  admin, active only, type filter) at their current version; unknown, unreadable or inactive ids are dropped silently
+  (no existence oracle). The passage is the item's chunk sharing the most terms with the question plus the previous one.
+  A malformed id is a 400.
+- **Q: How does the heuristic model use history?** Terms of the question first; if no sentence qualifies, it retries
+  with the previous question's terms added. Claude resolves references itself from the history.
+- **Q: Limits?** At most 10 turns (older ones are a 400, not silently cut, so the caller knows); each question ≤2000
+  characters, each answer ≤4000, ≤20 citations per turn.
+- **Q: Audit log?** One additive column `ask_log.history_turns` (0 for a first question). Earlier questions and answers
+  are not stored: they were logged by their own call if made through DB4AI, and a client-supplied history may be
+  invented. Carried items appear in `sources` like any passage, so erasure already finds those rows.
+- **Not owner-level:** no new service, no stored content, one additive migration (`012_ask_history.sql`).

@@ -47,6 +47,7 @@ class AskIn(BaseModel):
     question: str
     type: str | None = None
     limit: int = 8
+    history: list[dict] | None = None  # earlier turns: {question, answer, citations: [{item_id}]}, oldest first
 
 
 class SyncItemIn(BaseModel):
@@ -179,7 +180,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.post("/ask")
     def post_ask(body: AskIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
-        return service.ask(c, a, body.question, types=[body.type] if body.type else None, limit=body.limit)
+        return service.ask(c, a, body.question, types=[body.type] if body.type else None, limit=body.limit,
+                           history=body.history)
 
     @app.get("/ask/log")
     def get_ask_log(actor_name: str | None = Query(None, alias="actor"), item: str | None = None, limit: int = 50,

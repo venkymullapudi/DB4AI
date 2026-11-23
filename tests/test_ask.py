@@ -31,8 +31,8 @@ class Scripted:
     def __init__(self, reply):
         self.reply, self.seen = reply, None
 
-    def answer(self, question, passages):
-        self.seen = passages
+    def answer(self, question, passages, history=None):
+        self.seen, self.history = passages, history
         return self.reply
 
 
@@ -224,3 +224,127 @@ def test_ask_log_over_http(world, db_url, monkeypatch):
         got = client.get("/ask/log", headers=hr, params={"actor": "bob", "item": str(r["item_id"])}).json()
         assert [x["actor"] for x in got] == ["bob"] and got[0]["citations"][0]["item_id"] == str(r["item_id"])
         assert client.get("/ask/log").status_code == 401
+
+
+# ---------------------------------------------------------------- multi-turn context
+
+def _launch(w, team=None):
+    return save(w, w.alice, team or w.eng, "Atlas launch plan",
+                "The Atlas launch moves to March 14. The rollout needs two extra engineers.")
+
+
+def test_follow_up_carries_items_cited_earlier(world):
+    w = world
+    r = _launch(w)
+    first = ask(w.conn, w.bob, "When is the Atlas launch?", llm=HeuristicLLM(), embedder=HashEmbedder())
+    assert first["answered"] and first["citations"][0]["item_id"] == r["item_id"]
+    turn = {"question": first["question"], "answer": first["answer"],
+            "citations": [{"item_id": str(c["item_id"])} for c in first["citations"]]}
+    # "And the cost?" alone finds nothing, so nothing to ground on
+    llm = Scripted(Answer(answered=True, answer="Two engineers.", citations=[
+        Citation(passage=1, quote="The rollout needs two extra engineers.")]))
+    alone = ask(w.conn, w.bob, "And the cost?", llm=llm, embedder=HashEmbedder())
+    assert not alone["answered"] and alone["sources"] == []
+    # with history, the earlier cited item is re-read (current version) and can be cited
+    res = ask(w.conn, w.bob, "And the cost?", llm=llm, embedder=HashEmbedder(), history=[turn])
+    assert res["answered"] and res["citations"][0]["item_id"] == r["item_id"] and res["citations"][0]["version"] == 1
+    assert [s["item_id"] for s in res["sources"]] == [r["item_id"]]
+    assert llm.history == [(first["question"], first["answer"])]
+    # the history answer itself is never a passage, so quoting it doesn't ground anything
+    llm = Scripted(Answer(answered=True, answer="March.", citations=[Citation(passage=2, quote=first["answer"])]))
+    res = ask(w.conn, w.bob, "And the cost?", llm=llm, embedder=HashEmbedder(), history=[turn])
+    assert not res["answered"] and all(first["answer"] not in p for p in llm.seen[1:])
+
+
+def test_follow_up_carried_items_respect_access_and_status(world):
+    w = world
+    r = _launch(w)
+    turn = {"question": "When is the Atlas launch?", "answer": "March 14.",
+            "citations": [{"item_id": str(r["item_id"])}]}
+    # carol can't read eng items: a cited id from someone else's history reveals nothing
+    res = ask(w.conn, w.carol, "And the cost?", llm=HeuristicLLM(), embedder=HashEmbedder(), history=[turn])
+    assert res["sources"] == [] and not res["answered"]
+    # an unknown id is dropped silently; a type filter applies to carried items too
+    import uuid
+    ghost = {**turn, "citations": [{"item_id": str(uuid.uuid4())}]}
+    assert ask(w.conn, w.bob, "And the cost?", llm=HeuristicLLM(), embedder=HashEmbedder(),
+               history=[ghost])["sources"] == []
+    assert ask(w.conn, w.bob, "And the cost?", llm=HeuristicLLM(), embedder=HashEmbedder(), types=["meeting"],
+               history=[turn])["sources"] == []
+    # archived items aren't carried
+    prov = Provenance(w.alice.id, "test")
+    with transaction(w.conn, prov):
+        store.new_version(w.conn, prov, r["item_id"], status="archived")
+    assert ask(w.conn, w.bob, "And the cost?", llm=HeuristicLLM(), embedder=HashEmbedder(),
+               history=[turn])["sources"] == []
+
+
+def test_follow_up_searches_with_the_previous_question(world, monkeypatch):
+    w = world
+    r = _launch(w)
+    run_until_idle(w.ctx)  # chunks, so vector search can match the combined query
+    calls = []
+    real = store.search
+
+    def spy(conn, actor, query, **kw):
+        calls.append(query)
+        return real(conn, actor, query, **kw)
+
+    monkeypatch.setattr(store, "search", spy)
+    turn = {"question": "Atlas launch", "answer": "", "citations": []}
+    res = ask(w.conn, w.bob, "how many engineers?", llm=HeuristicLLM(), embedder=HashEmbedder(), history=[turn])
+    assert calls == ["how many engineers?", "Atlas launch how many engineers?"]
+    assert res["answered"] and res["citations"][0]["item_id"] == r["item_id"]
+    calls.clear()
+    ask(w.conn, w.bob, "how many engineers?", llm=HeuristicLLM(), embedder=HashEmbedder())
+    assert calls == ["how many engineers?"]  # first questions search once
+
+
+def test_heuristic_answer_retries_with_previous_question_terms():
+    llm = HeuristicLLM()
+    passages = ["Atlas launch plan\nThe Atlas launch moves to March 14."]
+    assert not llm.answer("And the date?", passages).answered
+    res = llm.answer("And the date?", passages, history=[("When is the Atlas launch?", "")])
+    assert res.answered and res.citations[0].quote == "The Atlas launch moves to March 14."
+
+
+def test_history_is_validated(world):
+    import pytest
+    w = world
+    turn = {"question": "q", "answer": "a", "citations": []}
+    bad = [
+        [turn] * 11,                                          # too many turns
+        [{"answer": "a"}],                                     # no question
+        [{"question": "q", "answer": "x" * 4001}],            # answer too long
+        [{"question": "q", "citations": [{"item_id": "nope"}]}],  # not a uuid
+        [{"question": "q", "citations": [{"item_id": None}] * 21}],
+        ["just a string"],
+    ]
+    for h in bad:
+        with pytest.raises(ValueError):
+            ask(w.conn, w.bob, "And then?", llm=HeuristicLLM(), embedder=HashEmbedder(), history=h)
+
+
+def test_follow_up_over_http_mcp_and_log(world, db_url, monkeypatch):
+    w = world
+    monkeypatch.setenv("DB4AI_LLM", "heuristic")
+    monkeypatch.setenv("DB4AI_ASK_LOG", "ids")
+    r = _launch(w)
+    with TestClient(create_app(db_url)) as client:
+        h = {"Authorization": f"Bearer {w.tokens['bob']}"}
+        first = client.post("/ask", headers=h, json={"question": "When is the Atlas launch?"}).json()
+        assert first["answered"]
+        res = client.post("/ask", headers=h, json={
+            "question": "And the date again?", "history": [first]}).json()
+        assert res["answered"] and res["citations"][0]["item_id"] == str(r["item_id"])
+        assert client.post("/ask", headers=h, json={
+            "question": "x", "history": [{"question": "q", "citations": [{"item_id": "nope"}]}]}).status_code == 400
+        rows = client.get("/ask/log", headers=h).json()
+        assert sorted(x["history_turns"] for x in rows) == [0, 1]
+    monkeypatch.setenv("DB4AI_TOKEN", w.tokens["bob"])
+    from db4ai import mcp_server
+    mcp_server._conn = None
+    res = mcp_server.ask("And the date again?", history=[{"question": "When is the Atlas launch?",
+                                                          "citations": [{"item_id": str(r["item_id"])}]}])
+    assert res["answered"]
+    mcp_server._conn.close()

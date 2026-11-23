@@ -48,7 +48,7 @@ right priority, with a one-line reason.
       `<file id>#<sheet id>`), with removed tabs/files as `deleted_datasets`. Why: the connector half of the split item.
 - [x] **`ask` audit log.** Optional log of questions asked (who asked what, which items were searched and cited).
       Why: v1 `ask` left no trace of what was read. Split from "`ask` follow-ups".
-- [ ] **`ask` multi-turn context.** Follow-up questions that build on earlier ones. Why: the other half of the split
+- [x] **`ask` multi-turn context.** Follow-up questions that build on earlier ones. Why: the other half of the split
       "`ask` follow-ups" item; v1 `ask` is stateless.
 - [ ] **Per-team notification routing.** Send a team's pending decisions to that team's channel (webhook URLs are
       secrets, so map team → env name, not URL, in the DB). Why: v1 sends every decision to every webhook.
