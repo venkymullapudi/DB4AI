@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -51,7 +51,24 @@ def sync_batch(conn: Conn, actor: Actor, source: str, *, items: list[dict], curs
                                            cursor, expected_cursor, deleted, snapshots, deleted_datasets))
 
 
-def search(conn: Conn, actor: Actor, query: str, *, types: list[str] | None = None, limit: int = 10) -> list[dict]:
+def parse_as_of(as_of: str | datetime | None) -> datetime | None:
+    """ISO 8601 timestamp (a time without an offset is UTC), or None for "now"."""
+    if as_of is None or as_of == "":
+        return None
+    if isinstance(as_of, str):
+        try:
+            as_of = datetime.fromisoformat(as_of.strip().replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(f"as_of must be an ISO 8601 timestamp, got {as_of!r}") from None
+    return as_of if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
+
+
+def search(conn: Conn, actor: Actor, query: str, *, types: list[str] | None = None, limit: int = 10,
+           as_of: str | datetime | None = None) -> list[dict]:
+    """Hybrid search now, or full-text search over items as they read at `as_of`."""
+    t = parse_as_of(as_of)
+    if t is not None:
+        return jsonable(store.search_as_of(conn, actor, query, t, types=types, limit=limit))
     return jsonable(store.search(conn, actor, query, embedder=get_embedder(), types=types, limit=limit))
 
 
@@ -68,7 +85,10 @@ def ask_log(conn: Conn, actor: Actor, *, actor_name: str | None = None, item_id:
                                 limit=limit))
 
 
-def get(conn: Conn, actor: Actor, item_id: str) -> dict:
+def get(conn: Conn, actor: Actor, item_id: str, as_of: str | datetime | None = None) -> dict:
+    t = parse_as_of(as_of)
+    if t is not None:
+        return jsonable(store.get_item_as_of(conn, actor, UUID(item_id), t))
     return jsonable(store.get_item(conn, actor, UUID(item_id)))
 
 

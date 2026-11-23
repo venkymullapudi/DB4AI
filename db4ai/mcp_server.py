@@ -78,10 +78,13 @@ def log_decision(decision: str, rationale: str = "", owner: str | None = None, t
 
 
 @mcp.tool()
-def search(query: str, type: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
-    """Hybrid full-text + semantic search over items you can access. `type`: meeting|document|memory|decision."""
+def search(query: str, type: str | None = None, limit: int = 10, as_of: str | None = None) -> list[dict[str, Any]]:
+    """Hybrid full-text + semantic search over items you can access. `type`: meeting|document|memory|decision.
+
+    `as_of` (ISO 8601 timestamp) searches items as they read at that time (full-text only).
+    """
     c, a = _ctx()
-    return service.search(c, a, query, types=[type] if type else None, limit=limit)
+    return service.search(c, a, query, types=[type] if type else None, limit=limit, as_of=as_of)
 
 
 @mcp.tool()
@@ -99,10 +102,14 @@ def ask(question: str, type: str | None = None, limit: int = 8,
 
 
 @mcp.tool()
-def get_item(item_id: str) -> dict[str, Any]:
-    """Current version of an item, with its AI metadata and links."""
+def get_item(item_id: str, as_of: str | None = None) -> dict[str, Any]:
+    """Current version of an item, with its AI metadata and links.
+
+    `as_of` (ISO 8601 timestamp) returns the item and its links as they were at that time, plus
+    `current_version` and `current_status`.
+    """
     c, a = _ctx()
-    return service.get(c, a, item_id)
+    return service.get(c, a, item_id, as_of=as_of)
 
 
 @mcp.tool()

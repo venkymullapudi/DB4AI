@@ -37,6 +37,12 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
 - Each version records `actor`, `source`, `reason`, and `harness_decision_id` if a human approved it.
 - Status (active / archived / merged) is part of the version, so archiving and merging are also just new versions.
 - Revert = new version that copies an earlier one.
+- **"As of" reads** (`as_of`, ISO 8601; no offset = UTC): an item reads as its latest version created at or before
+  then, plus `current_version`/`current_status`; links are rebuilt from `change_log` (inserts minus deletes up to
+  then), with the other item's title as of then. An item that didn't exist yet is "not found"; team scope is today's.
+  As-of search is full-text over each item's version then (status filters apply to the status then); vector scores
+  are skipped because chunks and embeddings are derived from current content only. Items erased since are left out of
+  as-of search, and their old versions read back scrubbed. Reads change nothing and aren't logged, like `get_item`.
 - **Erasure / redaction** (`erase_item`, `redact_item`) is the only sanctioned bypass of the append-only triggers.
   Both are always `ask_first` (whatever `policies` says) and only an admin can approve them; neither can be reverted.
   While the approved decision is applied, the triggers let the content columns (title, body, metadata, blob,

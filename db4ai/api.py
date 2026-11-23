@@ -140,8 +140,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return service.save(c, a, **body.model_dump())
 
     @app.get("/items/{item_id}")
-    def get_item(item_id: str, a: Actor = Depends(actor), c: Conn = Depends(conn)):
-        return service.get(c, a, item_id)
+    def get_item(item_id: str, as_of: str | None = None, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.get(c, a, item_id, as_of=as_of)
 
     @app.get("/items/{item_id}/history")
     def get_history(item_id: str, a: Actor = Depends(actor), c: Conn = Depends(conn)):
@@ -175,8 +175,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
                                   deleted_datasets=body.deleted_datasets)
 
     @app.get("/search")
-    def get_search(q: str, type: str | None = None, limit: int = 10, a: Actor = Depends(actor), c: Conn = Depends(conn)):
-        return service.search(c, a, q, types=[type] if type else None, limit=limit)
+    def get_search(q: str, type: str | None = None, limit: int = 10, as_of: str | None = None,
+                   a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.search(c, a, q, types=[type] if type else None, limit=limit, as_of=as_of)
 
     @app.post("/ask")
     def post_ask(body: AskIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):

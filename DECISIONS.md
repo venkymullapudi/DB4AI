@@ -512,3 +512,26 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
   No MCP tool: this is operator configuration, not something an agent should change. The CLI needs `--as` rather than
   inventing an admin identity.
 - **Not owner-level:** no data deleted, no new service or account, one additive migration (`013_notify_routes.sql`).
+
+## 2026-11-24 — "As of" queries
+Grilled one question at a time; each answer is the recommended one, resolved from the code.
+- **Q: What does "the item as of T" mean?** Its highest-numbered version with `created_at <= T`. `created_at` is
+  `clock_timestamp()` (row insert time), so versions in one transaction still order. A version whose transaction
+  committed after T but inserted before it counts as "then"; acceptable for an audit read, noted here.
+- **Q: Which surfaces?** `as_of` on `get_item` and `search` (HTTP query param, MCP argument, `service`). `history`
+  already shows every version. `ask` as of a time is split into its own roadmap item to keep this run to one change.
+- **Q: Item created after T, or unknown?** Both "not found" (404). Team read access is checked first, against the
+  item's team (teams never change per version), so outsiders get 403 as today.
+- **Q: Links?** Links can be deleted (undoing a link decision), so `links` is rebuilt from `change_log`: link inserts
+  at or before T minus link deletes at or before T, with the other item's title as of T; links to items that didn't
+  exist yet are dropped.
+- **Q: Search as of T?** Full-text only, over each item's version as of T; status filter (`active` unless
+  `include_inactive`) applies to the status then. Vector scores are skipped: `item_chunks`/`item_embeddings` are
+  derived copies of current content, so an old version has none, and re-embedding the past per query is too costly.
+  Results carry `version` and `chunk: null`; the score is the same full-text half as live search.
+- **Q: Erased items?** Their old versions are scrubbed in place, so an as-of read returns the tombstone text with
+  `current_status: erased`; as-of search excludes items erased since. Erasure stays complete.
+- **Q: Timestamp format?** ISO 8601; `Z` accepted; no offset means UTC; anything else is a 400.
+- **Q: Index/migration?** None. Item lookups use `unique (item_id, version)`; as-of search scans versions up to T,
+  fine for a rare audit query. Add an index if it shows up in practice.
+- **Not owner-level:** read-only, no migration, no new service.

@@ -52,7 +52,9 @@ right priority, with a one-line reason.
       "`ask` follow-ups" item; v1 `ask` is stateless.
 - [x] **Per-team notification routing.** Send a team's pending decisions to that team's channel (webhook URLs are
       secrets, so map team → env name, not URL, in the DB). Why: v1 sends every decision to every webhook.
-- [ ] "As of" queries: read any item or search results as they were at a given time.
+- [x] "As of" queries: read any item or search results as they were at a given time.
+- [ ] **`ask` as of a time.** Answer from items as they read at `as_of` (full-text passages from the old version).
+      Why: split from "As of" queries; v1 time travel covers `get_item` and `search` only.
 
 ## Later
 

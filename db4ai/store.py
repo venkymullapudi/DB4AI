@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -369,3 +370,85 @@ def search(conn: Conn, actor: Actor, query: str, *, embedder=None, limit: int = 
         r["score"] = round(min(r["fts"], 1.0) * 0.5 + r["vec"], 4)
         r.pop("fts"), r.pop("vec")
     return ranked[:limit]
+
+
+# ---------------------------------------------------------------- "as of" reads
+
+def _version_as_of(conn: Conn, item_id: UUID, as_of: datetime) -> dict | None:
+    """The item as it read at `as_of`: its latest version created at or before then (same shape as items_current)."""
+    return conn.execute(
+        "select i.id, i.team_id, i.type, i.external_key, i.created_at, i.created_by,"
+        " v.version, v.title, v.body, v.metadata, v.status, v.merged_into, v.blob_sha256,"
+        " v.content_hash, v.actor_id as updated_by, v.source, v.reason, v.created_at as updated_at"
+        " from items i join item_versions v on v.item_id = i.id"
+        " where i.id = %s and v.created_at <= %s order by v.version desc limit 1",
+        (item_id, as_of),
+    ).fetchone()
+
+
+def _links_as_of(conn: Conn, item_id: UUID, as_of: datetime) -> list[dict]:
+    """Links of the item that existed at `as_of`, rebuilt from the append-only change_log (links can be deleted)."""
+    rows = conn.execute(
+        "select ins.after->>'kind' as kind, (ins.after->>'confidence')::real as confidence,"
+        " case when ins.after->>'src' = %(id)s then ins.after->>'dst' else ins.after->>'src' end as other"
+        " from change_log ins"
+        " where ins.entity = 'link' and ins.op = 'insert' and ins.at <= %(t)s"
+        " and (ins.after->>'src' = %(id)s or ins.after->>'dst' = %(id)s)"
+        " and not exists (select 1 from change_log del where del.entity = 'link' and del.op = 'delete'"
+        "  and del.entity_id = ins.entity_id and del.at <= %(t)s)"
+        " order by confidence desc nulls last",
+        {"id": str(item_id), "t": as_of},
+    ).fetchall()
+    out = []
+    for r in rows:
+        other = _version_as_of(conn, UUID(r["other"]), as_of)
+        if other is not None:
+            out.append({"kind": r["kind"], "confidence": r["confidence"], "other": other["id"],
+                        "other_title": other["title"], "other_type": other["type"]})
+    return out
+
+
+def get_item_as_of(conn: Conn, actor: Actor, item_id: UUID, as_of: datetime) -> dict:
+    """The item as it was at `as_of`, plus `as_of`, `current_version` and `current_status`.
+
+    Unknown items and items created after `as_of` are both "not found". An erased item's old versions were
+    scrubbed, so they read back as the tombstone text; `current_status` says so.
+    """
+    team = conn.execute("select team_id from items where id = %s", (item_id,)).fetchone()
+    if team is None:
+        raise KeyError(f"item {item_id} not found")
+    actor.require_read(team["team_id"])
+    row = _version_as_of(conn, item_id, as_of)
+    if row is None:
+        raise KeyError(f"item {item_id} did not exist at {as_of.isoformat()}")
+    cur = _current(conn, item_id)
+    row["as_of"], row["current_version"], row["current_status"] = as_of, cur["version"], cur["status"]
+    row["links"] = _links_as_of(conn, item_id, as_of)
+    return row
+
+
+def search_as_of(conn: Conn, actor: Actor, query: str, as_of: datetime, *, limit: int = 10,
+                 types: list[str] | None = None, include_inactive: bool = False) -> list[dict]:
+    """Full-text search over items as they read at `as_of` (each item's latest version at or before then).
+
+    Vector similarity is skipped: chunks and embeddings are derived from current content only, so an old
+    version has none. Each result has `chunk` None and the matching `version`. Items erased since are left out.
+    """
+    teams = None if actor.is_admin else list(actor.teams)
+    rows = conn.execute(
+        "with v as (select distinct on (v.item_id) v.item_id, v.version, v.title, v.body, v.status, v.created_at"
+        "  from item_versions v where v.created_at <= %(t)s order by v.item_id, v.version desc)"
+        " select i.id, v.version, v.title, i.type, i.team_id, v.status, v.created_at as updated_at,"
+        " ts_rank(to_tsvector('english', v.title || ' ' || v.body), plainto_tsquery('english', %(q)s)) as score"
+        " from v join items i on i.id = v.item_id join items_current c on c.id = i.id"
+        " where to_tsvector('english', v.title || ' ' || v.body) @@ plainto_tsquery('english', %(q)s)"
+        " and c.status <> 'erased' and (%(inactive)s or v.status = 'active')"
+        " and (%(teams)s::uuid[] is null or i.team_id = any(%(teams)s::uuid[]))"
+        " and (%(types)s::text[] is null or i.type = any(%(types)s::text[]))"
+        " order by score desc, i.id limit %(limit)s",
+        {"t": as_of, "q": query, "inactive": include_inactive, "teams": teams, "types": types, "limit": limit},
+    ).fetchall()
+    for r in rows:
+        r["score"] = round(min(float(r["score"]), 1.0) * 0.5, 4)
+        r["chunk"] = None
+    return rows

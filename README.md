@@ -12,6 +12,9 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   under their content hash *before* the row that references them commits, so a row never points at a missing blob.
 - **Nothing is overwritten.** Every edit is a new version that records who made it (a human or an agent),
   where it came from and why. Database triggers block `UPDATE`/`DELETE` on history. Undo is a new version.
+- **Time travel.** `GET /items/{id}?as_of=<ISO time>` returns the item and its links as they were then;
+  `GET /search?q=...&as_of=<ISO time>` searches items as they read then (full-text only). MCP `get_item`/`search`
+  take the same `as_of`.
 - **Erasure and redaction.** The one exception to append-only: an admin-approved harness decision can erase an
   item's content from every version, blob, embedding, audit row and related decision (`POST /items/{id}/erase`), or
   replace chosen terms with `[redacted]` everywhere (`POST /items/{id}/redact`). Anyone who can read the item can
