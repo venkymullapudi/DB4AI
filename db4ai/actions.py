@@ -174,6 +174,54 @@ def _promote_apply(conn, prov, p):
     return {"dataset_id": str(ds["id"]), "table": f"data.{ds['table_name']}", "rows": n}
 
 
+# ---------------------------------------------------------------- synced datasets (connectors)
+
+def _team_of_dataset(conn: Conn, p: dict) -> UUID | None:
+    row = conn.execute("select team_id from datasets where id=%s", (p["dataset_id"],)).fetchone()
+    return row["team_id"] if row else None
+
+
+def _ds(conn: Conn, dataset_id) -> dict:
+    row = conn.execute("select * from datasets where id=%s", (dataset_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"dataset {dataset_id} not found")
+    return row
+
+
+def _alter_diff(conn, p):
+    ds = _ds(conn, p["dataset_id"])
+    return {"dataset": ds["name"], "table": f"data.{ds['table_name']}", "add_columns": p.get("add", []),
+            "retype_to_text": p.get("retype", []), "retire_columns": p.get("retire", [])}
+
+
+def _alter_apply(conn, prov, p):
+    r = datasets.alter(conn, p["dataset_id"], p.get("add", []), p.get("retype", []), p.get("retire", []))
+    log_change(conn, prov, "dataset", str(p["dataset_id"]), "alter",
+               after={"add": p.get("add", []), "retype": p.get("retype", []), "retire": p.get("retire", [])})
+    return r
+
+
+def _archive_ds_diff(conn, p):
+    ds = _ds(conn, p["dataset_id"])
+    return {"dataset": ds["name"], "table": f"data.{ds['table_name']}",
+            "archived": [ds["archived_at"] is not None, True]}
+
+
+def _archive_ds_apply(conn, prov, p):
+    ds = _ds(conn, p["dataset_id"])
+    conn.execute("update datasets set archived_at=now(), archived_by_decision=%s where id=%s",
+                 (prov.decision_id, ds["id"]))
+    log_change(conn, prov, "dataset", str(ds["id"]), "archive", after={"source_deleted": p.get("source_deleted")})
+    return {"dataset_id": str(ds["id"]), "was_archived": ds["archived_at"] is not None}
+
+
+def _archive_ds_revert(conn, prov, result):
+    if not result.get("was_archived"):
+        conn.execute("update datasets set archived_at=null, archived_by_decision=null where id=%s",
+                     (result["dataset_id"],))
+        log_change(conn, prov, "dataset", result["dataset_id"], "unarchive")
+
+
 # ---------------------------------------------------------------- access
 
 def _access_apply(conn, prov, p):
@@ -193,6 +241,8 @@ REGISTRY: dict[str, Action] = {
     "archive_item": _status_action("archived"),
     "merge_items": Action(_team_of_item("keep"), _merge_diff, _merge_apply, _revert_versions),
     "promote_schema": Action(lambda c, p: UUID(p["team_id"]), _promote_diff, _promote_apply, None),
+    "alter_dataset": Action(_team_of_dataset, _alter_diff, _alter_apply, None),  # never drops a column
+    "archive_dataset": Action(_team_of_dataset, _archive_ds_diff, _archive_ds_apply, _archive_ds_revert),
     "change_access": Action(lambda c, p: UUID(p["team_id"]), lambda c, p: dict(p), _access_apply, None),
     # Redaction/erasure: always ask_first, admin-only (see harness.ADMIN_ONLY), never revertible.
     "erase_item": Action(_team_of_item("item_id"), erasure._erase_diff, erasure._erase_apply, None),

@@ -41,9 +41,11 @@ right priority, with a one-line reason.
       the token can read.
 - [x] **More Drive file types.** Sync PDFs and .docx (text via the existing importers). Why: split from folder
       scoping; v1 only synced Docs and text files.
-- [ ] **Drive Sheets as datasets.** Export Sheets as CSV into `data.*` tables (one per sheet/tab), with deletions and
-      schema drift going through the harness. Why: split from "More Drive file types"; datasets aren't items, so the
-      connector framework needs a dataset record kind first.
+- [x] **Dataset records in the connector framework.** Batches carry full table snapshots that are diffed into `data.*`
+      tables, with schema drift (`alter_dataset`) and deletions (`archive_dataset`) going through the harness. Why: split
+      from "Drive Sheets as datasets"; datasets aren't items, so the framework needed a dataset record kind first.
+- [ ] **Drive Sheets as datasets.** In `gdrive`, export each Sheet tab as CSV into a dataset record (key
+      `<file id>#<sheet id>`), with removed tabs/files as `deleted_datasets`. Why: the connector half of the split item.
 - [ ] **`ask` follow-ups.** Optional audit log of questions asked (who asked what, which items were cited), and
       multi-turn context. Why: v1 `ask` is stateless and leaves no trace of what was read.
 - [ ] **Per-team notification routing.** Send a team's pending decisions to that team's channel (webhook URLs are

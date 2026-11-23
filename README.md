@@ -45,6 +45,10 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   below them; files that leave the scope count as deleted.
   A file deleted (or trashed) in the source proposes archiving its item in the harness; nothing is archived until a
   team owner approves, and the proposal is withdrawn if the file comes back first.
+  A batch can also carry `datasets` (`key`, `name`, `columns`, `rows`: a full snapshot of one table, e.g. a sheet tab)
+  and `deleted_datasets`. A snapshot becomes a BI table (`data.<team>_<name>`) and later snapshots are diffed into it
+  row by row; new, removed or retyped columns wait for an `alter_dataset` approval, and a deleted dataset proposes
+  `archive_dataset` (the table stays readable, syncing stops).
 - **BI-ready.** Structured data lives in real tables (`data.<team>_<name>`), so Tableau, Metabase and others connect directly.
   A trigger records every row change in the append-only `change_log`.
 

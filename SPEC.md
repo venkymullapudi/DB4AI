@@ -54,6 +54,9 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
   admin-only, at most 100 per erasure, source `erasure`, `copy_of` = the item), because a quote may be legitimate.
 - Structured datasets are real tables in the `data` schema. A row-level trigger writes every
   change to the shared append-only `change_log` with the same actor/source/reason fields.
+- **Synced datasets** (connector snapshots, §6) have `datasets.external_key` = `<source>:<key>`. Their columns can be
+  marked `retired` (no longer in the source; kept with their values, null on new rows) but are never dropped, and an
+  archived dataset (`archived_at`) keeps its table and stops syncing.
 
 ## 4. Self-maintenance — six maintainer jobs
 1. **enrich** — summary, tags, entities, embedding for new/changed content. Summary, tags and entities are
@@ -69,7 +72,7 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
 |---|---|---|
 | `auto` | apply now, logged | `enrich`, `add_tags`, `add_link`, `set_summary`, `set_entities` |
 | `auto_notice` | apply now; a human can revert within N days | `mark_stale`, `merge_items` (confidence ≥ threshold) |
-| `ask_first` | queued in the harness; nothing happens until approved | `archive_item`, `promote_schema`, `merge_items` (low confidence), `resolve_contradiction`, `change_access`, `erase_item` and `redact_item` (always; admin-only), **any unknown action** |
+| `ask_first` | queued in the harness; nothing happens until approved | `archive_item`, `promote_schema`, `alter_dataset`, `archive_dataset`, `merge_items` (low confidence), `resolve_contradiction`, `change_access`, `erase_item` and `redact_item` (always; admin-only), **any unknown action** |
 
 Tiers come from the `policies` table (per team, with a global default). The AI never picks a tier.
 
@@ -118,6 +121,18 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   `transcripts` (a folder of `.vtt`/`.srt`/`.txt` → `meeting` items with `speakers`, `duration_seconds`, `path`;
   cursor = newest mtime synced, files at that mtime are re-sent; deletions by comparing the folder with the live keys,
   failing closed: a missing folder is an error, an empty one reports no deletions).
+- **Dataset records**: a batch can carry `datasets` (key, name, columns, rows of cell strings: a full snapshot of one
+  source table, at most 200 columns and 100,000 rows) and `deleted_datasets`; each counts as one record toward the 500.
+  The first snapshot of a key creates `data.<team>_<name>` with inferred column types (name taken → `_<hash of key>`
+  suffix; later renames in the source are ignored). Later snapshots are diffed into the table as a multiset of rows over
+  the synced columns: rows the source no longer has are deleted, new rows inserted, unchanged rows keep their `_row_id`,
+  so an identical snapshot writes nothing and `change_log` holds only real row changes. **Schema drift** (a new column, a
+  column gone from the source, or a value that no longer fits a column's type) proposes `alter_dataset` (ask_first by
+  default; payload `add`, `retype` to text, `retire`) and the snapshot is not applied until the table matches (fail
+  closed); a newer drift supersedes an older pending one (status `expired`), and a rejected drift is not re-proposed.
+  `alter_dataset` never drops or narrows a column and can't be reverted. A deleted key proposes `archive_dataset`
+  (ask_first; payload dataset id and `source_deleted`), withdrawn if the snapshot comes back first; approved, the table
+  stays and later snapshots are ignored until the decision is reverted.
 - Built in: `gdrive` (`db4ai sync gdrive --team <t>`): Google Docs (exported as `text/plain`), text/Markdown files,
   and PDF / .docx files (downloaded; text extracted as by the CLI importer, file not stored as a blob), ≤10 MB, that the
   token's account can read, shared drives included, as `document` items (key = Drive file id; metadata

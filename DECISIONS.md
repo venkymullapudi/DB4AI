@@ -372,3 +372,35 @@ connector framework only saves items and a dataset needs its own record kind, ta
 - **Tests:** hand-built PDF (with and without a text layer), a broken PDF, python-docx files, an edit and a deletion,
   and an old untagged cursor re-listing once.
 - **Not owner-level:** no new dependency (pypdf and python-docx were already required), no service, no migration.
+
+
+## 2026-11-23 — dataset records in the connector framework
+Split from "Drive Sheets as datasets": this run adds the dataset record kind to the framework (and `POST /sync`); the
+Sheets export in `gdrive` is the next roadmap item.
+- **Q: What does a connector send for a table?** A `DatasetRecord(key, name, columns, rows)`: the full current snapshot
+  of one source table (a sheet tab), cells as strings. Snapshots, not row deltas, because Sheets (and most sources)
+  have no stable row ids; DB4AI computes the delta.
+- **Q: Which table does it go to?** The first snapshot of `<source>:<key>` creates `data.<team>_<name>` and records
+  the key in a new `datasets.external_key` column (unique per team). If the name is taken (another sheet, a CSV
+  import) a short hash of the key is appended. A later rename in the source keeps the table: BI dashboards point at it.
+- **Q: How are rows updated?** Multiset diff in SQL over the synced columns (snapshot loaded into a temp table, rows
+  matched with `is not distinct from` and row_number for duplicates): delete what's gone, insert what's new. Unchanged
+  rows keep their `_row_id`, an identical snapshot writes nothing, and the existing capture trigger logs each real
+  change in `change_log` with `connector:<source>` provenance. A changed cell is a delete + insert (no row identity).
+- **Q: Schema drift?** New column, column gone from the source, or a value that no longer parses as the column's type
+  → `alter_dataset` proposal (new policy row, `ask_first`), and that snapshot is not applied (fail closed: the table
+  never mixes two schemas). The action only adds columns, widens to `text`, or marks columns `retired`; it never drops
+  or narrows, so approving can't destroy data (no revert needed, none offered). Retired columns keep their values on
+  existing rows and are null on new ones; a retired column that reappears is un-retired by the next `alter_dataset`.
+  A newer drift expires the older pending proposal for that dataset; a rejected one is never re-proposed (the dataset
+  stays as it was until the source or the policy changes). A team can set `alter_dataset` to `auto` to apply drift
+  in the same batch.
+- **Q: Deletions?** `deleted_datasets` → `archive_dataset` (new policy row, `ask_first`) on a live dataset; unknown or
+  archived keys are ignored. Archiving never drops the table (BI keeps reading it); it sets `archived_at` and later
+  snapshots are skipped. A snapshot that comes back withdraws a pending proposal; an approved archive can be reverted.
+- **Q: Limits?** 200 columns, 100,000 rows per snapshot; a row longer than the header is rejected (cells would be
+  silently lost). Each dataset record and deletion counts toward the 500 per batch.
+- **Q: Erasure?** Synced datasets have no `item_id`, so item erasure doesn't touch them; erasing rows of a dataset is a
+  separate future concern (noted, not needed for any current item).
+- **Not owner-level:** no data deleted (no column drops, archive keeps the table), no service, one additive migration
+  (`010_synced_datasets.sql`).

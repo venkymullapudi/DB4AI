@@ -140,3 +140,147 @@ def run_readonly_sql(conn: Conn, actor: Actor, statement: str, limit: int = 500)
         conn.execute("set local statement_timeout = '30s'")
         cur = conn.execute(statement)
         return cur.fetchmany(limit) if cur.description else []
+
+
+# ---------------------------------------------------------------- snapshots from connectors
+
+MAX_ROWS = 100_000
+MAX_COLUMNS = 200
+
+
+def _fits(v, typ: str) -> bool:
+    """Can the source value `v` be stored in a column of type `typ` (as `_convert` would store it)?"""
+    if v in ("", None) or typ in ("text", "jsonb"):
+        return True
+    v = str(v)
+    try:
+        if typ == "bigint":
+            return bool(re.fullmatch(r"-?\d{1,18}", v))
+        if typ == "double precision":
+            float(v)
+            return True
+        if typ == "boolean":
+            return v.lower() in ("true", "false", "yes", "no")
+        if typ == "timestamptz":
+            datetime.fromisoformat(v)
+            return True
+        if typ == "uuid":
+            UUID(v)
+            return True
+    except (ValueError, TypeError):
+        return False
+    return False
+
+
+def snapshot_header(columns: list[str]) -> list[str]:
+    """Source column names → unique column slugs (a repeated name gets _2, _3...)."""
+    out: list[str] = []
+    for c in columns:
+        base = slug(str(c or "column"))
+        name, n = base, 1
+        while name in out or name in ("_row_id", "_created_at"):
+            n += 1
+            name = f"{base[:45]}_{n}"
+        out.append(name)
+    return out
+
+
+def check_snapshot(columns: list[str], rows: list[list]) -> None:
+    if not columns:
+        raise ValueError("a dataset snapshot needs at least one column")
+    if len(columns) > MAX_COLUMNS:
+        raise ValueError(f"at most {MAX_COLUMNS} columns per dataset")
+    if len(rows) > MAX_ROWS:
+        raise ValueError(f"at most {MAX_ROWS} rows per dataset snapshot")
+    if any(len(r) > len(columns) for r in rows):
+        raise ValueError("a snapshot row has more cells than the header")
+
+
+def drift(ds: dict, header: list[str], rows: list[list]) -> dict:
+    """What `alter_dataset` must change before this snapshot can be applied: {add, retype, retire}."""
+    cols = {c["name"]: c for c in ds["columns"]}
+    synced = [c["name"] for c in ds["columns"] if not c.get("retired") and c["name"] != "item_id"]
+    add, retype = [], []
+    for i, h in enumerate(header):
+        values = [r[i] if i < len(r) else None for r in rows]
+        c = cols.get(h)
+        if c is None:
+            add.append({"name": h, "type": _infer([v for v in values if v is not None])})
+        elif c.get("retired"):  # back in the source; if its values no longer fit, it comes back as text
+            fits = c["type"] == "text" or all(_fits(v, c["type"]) for v in values)
+            add.append({"name": h, "type": c["type"] if fits else "text"})
+        elif c["type"] != "text" and not all(_fits(v, c["type"]) for v in values):
+            retype.append(h)
+    retire = [n for n in synced if n not in header]
+    return {"add": add, "retype": retype, "retire": retire}
+
+
+def apply_snapshot(conn: Conn, ds: dict, header: list[str], rows: list[list]) -> dict:
+    """Diff the snapshot into data.<table>: delete rows the source no longer has, insert new ones. Rows are compared
+    on the synced (non-retired) columns as a multiset, so an unchanged snapshot writes nothing and change_log only
+    records real changes. Retired columns keep their old values on unchanged rows and are null on new ones."""
+    types = {c["name"]: c["type"] for c in ds["columns"]}
+    table = sql.Identifier(ds["table_name"])
+    cols = [sql.Identifier(h) for h in header]
+    col_list = sql.SQL(", ").join(cols)
+    snap = sql.Identifier(f"_snap_{ds['id'].hex[:12]}")
+    conn.execute(sql.SQL("create temp table {} on commit drop as select {} from data.{} limit 0").format(
+        snap, col_list, table))
+    conn.execute(sql.SQL("alter table {} add column _ord int").format(snap))
+    stmt = sql.SQL("insert into {} ({}, _ord) values ({})").format(
+        snap, col_list, sql.SQL(", ").join(sql.Placeholder() * (len(header) + 1)))
+    with conn.cursor() as cur:
+        cur.executemany(stmt, [[_convert(r[i] if i < len(r) else None, types[h]) for i, h in enumerate(header)] + [n]
+                               for n, r in enumerate(rows)])
+    match = sql.SQL(" and ").join(sql.SQL("n.{0} is not distinct from o.{0}").format(c) for c in cols)
+    res = conn.execute(sql.SQL(
+        "with o as (select _row_id, row_number() over (partition by {cols} order by _row_id) rn, {cols} from data.{t}),"
+        " n as (select row_number() over (partition by {cols} order by _ord) rn, _ord, {cols} from {s}),"
+        " del as (delete from data.{t} where _row_id in (select o._row_id from o where not exists"
+        "   (select 1 from n where n.rn = o.rn and {m})) returning 1),"
+        " ins as (insert into data.{t} ({cols}) select {ncols} from n where not exists"
+        "   (select 1 from o where o.rn = n.rn and {m}) order by n._ord returning 1)"
+        " select (select count(*) from del) as deleted, (select count(*) from ins) as inserted").format(
+        cols=col_list, t=table, s=snap, m=match,
+        ncols=sql.SQL(", ").join(sql.SQL("n.{}").format(c) for c in cols))).fetchone()
+    conn.execute(sql.SQL("drop table {}").format(snap))
+    return {"inserted": res["inserted"], "deleted": res["deleted"]}
+
+
+def alter(conn: Conn, dataset_id, add: list[dict], retype: list[str], retire: list[str]) -> dict:
+    """Schema change for a synced dataset (applied by the `alter_dataset` harness action). Never drops a column:
+    a column the source removed is only marked retired, so its existing values stay queryable."""
+    ds = conn.execute("select * from datasets where id=%s for update", (dataset_id,)).fetchone()
+    if ds is None:
+        raise KeyError(f"no dataset {dataset_id}")
+    table = sql.Identifier(ds["table_name"])
+    cols = [dict(c) for c in ds["columns"]]
+    by_name = {c["name"]: c for c in cols}
+    for a in add:
+        name, typ = a["name"], a["type"]
+        if name != slug(name) or typ not in TYPES:
+            raise ValueError(f"bad column {a!r}")
+        c = by_name.get(name)
+        if c is None:
+            conn.execute(sql.SQL("alter table data.{} add column {} {}").format(
+                table, sql.Identifier(name), sql.SQL(typ)))
+            c = {"name": name, "type": typ}
+            cols.append(c)
+            by_name[name] = c
+        else:
+            c.pop("retired", None)
+            if c["type"] != typ:
+                retype = [*retype, name] if typ == "text" else retype
+    for name in dict.fromkeys(retype):
+        c = by_name.get(name)
+        if c is None:
+            raise ValueError(f"no column {name!r}")
+        if c["type"] != "text":
+            conn.execute(sql.SQL("alter table data.{0} alter column {1} type text using {1}::text").format(
+                table, sql.Identifier(name)))
+            c["type"] = "text"
+    for name in retire:
+        if name in by_name and name != "item_id":
+            by_name[name]["retired"] = True
+    conn.execute("update datasets set columns=%s where id=%s", (Jsonb(cols), dataset_id))
+    return {"dataset_id": str(dataset_id), "table": f"data.{ds['table_name']}", "columns": cols}
