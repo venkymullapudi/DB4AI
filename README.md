@@ -39,7 +39,7 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   and only reads files newer than its cursor on the next run. Connectors that run elsewhere push batches to
   `POST /sync/{source}` (`items`, `deleted`, `cursor`, `expected_cursor`) and read `GET /sync/{source}/cursor`: the items and the
   cursor commit together, and a stale `expected_cursor` is a 409, so no batch is skipped or applied twice.
-  `db4ai sync gdrive --team eng` syncs Google Docs (exported as text) and text/Markdown files from Google Drive
+  `db4ai sync gdrive --team eng` syncs Google Docs (exported as text), text/Markdown files, and PDFs and .docx files (text extracted) from Google Drive
   (including shared drives) through the Drive changes API, with an OAuth token you supply in the environment.
   `--folder <id>` (repeatable, or `DB4AI_GDRIVE_FOLDERS`) limits it to those folders or shared drives and everything
   below them; files that leave the scope count as deleted.

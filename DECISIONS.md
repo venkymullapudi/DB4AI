@@ -347,3 +347,28 @@ Split from "Drive folder scoping and more file types": this run does scoping; fi
 - **Tests:** the fake Drive now filters `q` by mimeType and parents and serves `files.get`; a new test covers nested
   folders, moves in/out of files and folders, scope change, idempotent re-runs and fail-closed roots.
 - **Not owner-level:** no data is deleted (out-of-scope files go through ask_first archive), no new service, no migration.
+
+
+## 2026-11-23 — more Drive file types (PDF, .docx)
+Split from "More Drive file types": this run does PDF and .docx; Sheets → datasets is a new roadmap item, because the
+connector framework only saves items and a dataset needs its own record kind, table naming and schema-drift handling.
+- **Q: How is text extracted?** With the CLI importer's code (`ingest.text_from_bytes`, pypdf pages / python-docx
+  paragraphs), so a file synced from Drive and the same file imported by hand give the same body. Then the same
+  normalisation as Docs (BOM, CRLF, strip).
+- **Q: Store the original file as a blob?** No. The connector framework saves text records like `POST /items`; Drive
+  remains the source of the file and `web_view_link` points back to it. A blob copy would add storage, orphan GC and
+  erasure scope for no reader that needs it today.
+- **Q: Unreadable files?** A corrupt or encrypted PDF/.docx is skipped and logged (exception type only, no content),
+  like a 403 export, so one bad file can't block the sync forever. A file whose extracted text is empty (a scanned PDF;
+  no OCR in v1) is skipped too, rather than saved as an empty item. A previously synced file that becomes unreadable
+  keeps its last good version.
+- **Q: Size limit?** The same 10 MB cap (`size` from Drive), checked before downloading.
+- **Q: Existing installs already past their first listing?** Their `changes:` cursor would never see old PDFs. Every
+  cursor now carries `types:<sha256 of sorted synced mime types>[:8]:` (after the scope tag); a cursor without the
+  current tag starts one full listing, which is idempotent (unchanged files add no version). Cursors that aren't
+  Drive cursors at all still fail with `DriveError`.
+- **Q: Deletions/scope for the new types?** Automatic: they're in `SYNCED_TYPES`, which drives the listing query,
+  trash/removal and out-of-scope checks.
+- **Tests:** hand-built PDF (with and without a text layer), a broken PDF, python-docx files, an edit and a deletion,
+  and an old untagged cursor re-listing once.
+- **Not owner-level:** no new dependency (pypdf and python-docx were already required), no service, no migration.

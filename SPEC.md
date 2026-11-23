@@ -118,17 +118,20 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   `transcripts` (a folder of `.vtt`/`.srt`/`.txt` → `meeting` items with `speakers`, `duration_seconds`, `path`;
   cursor = newest mtime synced, files at that mtime are re-sent; deletions by comparing the folder with the live keys,
   failing closed: a missing folder is an error, an empty one reports no deletions).
-- Built in: `gdrive` (`db4ai sync gdrive --team <t>`): Google Docs (exported as `text/plain`) and text/Markdown files
-  (≤10 MB) the token's account can read, shared drives included, as `document` items (key = Drive file id; metadata
+- Built in: `gdrive` (`db4ai sync gdrive --team <t>`): Google Docs (exported as `text/plain`), text/Markdown files,
+  and PDF / .docx files (downloaded; text extracted as by the CLI importer, file not stored as a blob), ≤10 MB, that the
+  token's account can read, shared drives included, as `document` items (key = Drive file id; metadata
   `mime_type`, `modified_time`, `web_view_link`). OAuth token from the environment (`DB4AI_GDRIVE_TOKEN`, or a refresh
   token + client id/secret); DB4AI never stores it. Cursor = `list:<start>:<page>` during the first full listing (start
   = changes token taken before listing), then `changes:<token>`; one batch per API page, an idle sync writes nothing.
   429/5xx/rate-limit 403s are retried with backoff; a file whose export Drive refuses (403/404) is skipped and logged.
+  A PDF/.docx that can't be parsed (corrupt, encrypted) or has no text (scanned, no OCR) is skipped and logged.
+  Every cursor carries `types:<hash of the synced mime types>:`, so a release that syncs more types re-lists once.
   A removed (deleted or no longer shared) or trashed file is a deletion; the first full listing reports none.
   **Folder scope** (`--folder <id>`, repeatable, or `DB4AI_GDRIVE_FOLDERS`; a shared drive id is its root folder): only
   files under those folders, at any depth, are synced. The in-scope folder tree is resolved from Drive at each sync
   (at most 5000 folders); a root that is missing, trashed or not a folder is an error (fail closed). The cursor is
-  prefixed `scope:<hash of the folder ids>:` and the listing cursor is `list:<start>:<chunk>:<page>`; a cursor from
+  prefixed `scope:<hash of the folder ids>:` (before the types tag) and the listing cursor is `list:<start>:<chunk>:<page>`; a cursor from
   another scope starts a fresh full listing. A file moved out of scope is a deletion; a folder moved in has its
   existing files listed; after each scoped sync, synced files no longer anywhere in scope (e.g. their folder moved
   out) are deletions too, unless the scope lists no files at all.

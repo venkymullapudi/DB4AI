@@ -11,8 +11,11 @@ Cursor (opaque to the framework, never holds content):
   chosen folder ids, and the listing cursor is `list:<start>:<chunk>:<page>`. A cursor from another scope starts a
   fresh full listing, so adding a folder picks up its existing files.
 
+Every cursor also carries `types:<hash>:`, a hash of the synced file types, so a release that syncs more types re-lists
+once and picks up existing files of the new types (re-sending is idempotent).
+
 Each API page becomes one batch, so a crash resumes at the last page saved. Synced files: Google Docs (exported as
-plain text) and plain text / Markdown files. A removed or trashed file is reported as a deletion, which proposes
+plain text), plain text / Markdown files, and PDF / .docx files (text extracted with the file importers). A removed or trashed file is reported as a deletion, which proposes
 archiving its item through the harness.
 """
 
@@ -27,6 +30,7 @@ from typing import Callable, Iterator
 import httpx
 
 from .connectors import Batch, Record
+from .ingest import text_from_bytes
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +41,11 @@ FOLDER = "application/vnd.google-apps.folder"
 MAX_FOLDERS = 5000  # a scope larger than this is refused rather than half-synced
 PARENTS_PER_QUERY = 40  # `'<id>' in parents or ...` terms per files.list query
 TEXT_TYPES = {"text/plain", "text/markdown", "text/x-markdown"}
-SYNCED_TYPES = {GDOC, *TEXT_TYPES}
+PDF = "application/pdf"
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+BINARY_TYPES = {PDF: ".pdf", DOCX: ".docx"}  # downloaded, then text extracted like a CLI import
+SYNCED_TYPES = {GDOC, *TEXT_TYPES, *BINARY_TYPES}
+TYPES_TAG = "types:" + hashlib.sha256(",".join(sorted(SYNCED_TYPES)).encode()).hexdigest()[:8] + ":"
 MAX_BYTES = 10 * 1024 * 1024  # Drive's own export limit; larger text files are skipped
 FILE_FIELDS = "id,name,mimeType,modifiedTime,webViewLink,trashed,size,parents"
 _ALL_DRIVES = {"supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
@@ -106,6 +114,12 @@ class GoogleDrive:
     def scope_tag(self) -> str:
         return "scope:" + hashlib.sha256(",".join(self.roots).encode()).hexdigest()[:12] + ":"
 
+    @property
+    def cursor_tag(self) -> str:
+        """Prefix of every cursor: the folder scope (if any) and the synced file types. A cursor with another prefix
+        starts a fresh full listing."""
+        return (self.scope_tag if self.scoped else "") + TYPES_TAG
+
     # ------------------------------------------------------------ HTTP
 
     def _get(self, path: str, params: dict | None = None) -> httpx.Response:
@@ -140,7 +154,20 @@ class GoogleDrive:
             return None
         if r.status_code != 200:
             raise DriveError(f"Drive download of {f['id']} failed ({r.status_code}): {_reason(r)}")
-        return r.content.decode("utf-8", errors="replace").lstrip("﻿").replace("\r\n", "\n").strip()
+        ext = BINARY_TYPES.get(f["mimeType"])
+        if ext:
+            try:
+                text = text_from_bytes(ext, r.content)
+            except Exception as e:  # corrupt or encrypted file: skip it rather than block the sync
+                log.warning("skipping Drive file %s: can't read %s (%s)", f["id"], ext, type(e).__name__)
+                return None
+        else:
+            text = r.content.decode("utf-8", errors="replace")
+        text = text.lstrip("\ufeff").replace("\r\n", "\n").strip()
+        if not text and ext:  # e.g. a scanned PDF with no text layer (no OCR in v1)
+            log.warning("skipping Drive file %s: no text in %s", f["id"], ext)
+            return None
+        return text
 
     # ------------------------------------------------------------ folder scope
 
@@ -234,9 +261,11 @@ class GoogleDrive:
     # ------------------------------------------------------------ sync
 
     def fetch(self, cursor: str | None) -> Iterator[Batch]:
-        tag = self.scope_tag if self.scoped else ""
-        if cursor and cursor.startswith("scope:") != bool(tag) or (tag and cursor and not cursor.startswith(tag)):
-            log.info("Drive folder scope changed: starting a full listing")
+        tag = self.cursor_tag
+        if cursor and not cursor.startswith(tag):
+            if not cursor.startswith(("scope:", "types:", "list:", "changes:")):
+                raise DriveError(f"not a Google Drive cursor: {cursor!r}")
+            log.info("Drive folder scope or synced file types changed: starting a full listing")
             cursor = None
         inner = cursor[len(tag):] if cursor else None
         for b in self._fetch(inner):

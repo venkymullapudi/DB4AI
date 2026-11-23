@@ -6,7 +6,7 @@ import pytest
 
 from db4ai import connectors, store
 from db4ai.cli import main
-from db4ai.gdrive import FOLDER, GDOC, DriveError, GoogleDrive, TokenSource
+from db4ai.gdrive import DOCX, FOLDER, GDOC, PDF, TYPES_TAG as T, DriveError, GoogleDrive, TokenSource
 
 
 class FakeDrive:
@@ -14,7 +14,7 @@ class FakeDrive:
 
     def __init__(self):
         self.files: dict[str, dict] = {}
-        self.content: dict[str, str] = {}
+        self.content: dict[str, str | bytes] = {}
         self.change_log: list[dict] = []   # change number i+1 = change_log[i]
         self.valid_tokens = {"good"}
         self.fail_next: list[int] = []     # status codes to return before serving normally
@@ -87,7 +87,8 @@ class FakeDrive:
             assert q["mimeType"] == "text/plain"
             return httpx.Response(200, content=("﻿" + self.content[fid]).encode())
         if q.get("alt") == "media":
-            return httpx.Response(200, content=self.content[fid].encode())
+            c = self.content[fid]
+            return httpx.Response(200, content=c if isinstance(c, bytes) else c.encode())
         if fid in self.files:
             return httpx.Response(200, json=self.files[fid])
         return httpx.Response(404, json={"error": {"errors": [{"reason": "notFound"}]}})
@@ -113,7 +114,7 @@ def test_initial_listing_then_incremental_changes(world):
     r = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake, page_size=2))
     # Two list pages (the spreadsheet is skipped), then an empty changes page that writes nothing.
     assert r["saved"] == 3 and r["changed"] == 3
-    assert r["cursor"] == "changes:5"
+    assert r["cursor"] == T + "changes:5"
     hit = store.search(w.conn, w.alice, "pricing page Friday")[0]
     item = store.get_item(w.conn, w.alice, hit["id"])
     assert item["title"] == "Pricing plan" and item["body"] == "We ship the pricing page on Friday.\nLegal reviewed it."
@@ -121,7 +122,7 @@ def test_initial_listing_then_incremental_changes(world):
     assert item["metadata"] == {"mime_type": GDOC, "modified_time": "2026-11-01T00:00:00Z",
                                 "web_view_link": "https://docs.google.com/d/d1"}
     log = w.conn.execute("select after from change_log where entity='sync_cursor' order by id").fetchall()
-    assert [x["after"]["cursor"] for x in log] == ["list:5:2", "changes:5"]
+    assert [x["after"]["cursor"] for x in log] == [T + "list:5:2", T + "changes:5"]
 
     # Idle: nothing changed, nothing written.
     idle = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))
@@ -135,7 +136,7 @@ def test_initial_listing_then_incremental_changes(world):
     fake.files["d4"]["trashed"] = True
     fake.change_log[-1]["file"]["trashed"] = True
     r = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake, page_size=3))
-    assert (r["batches"], r["saved"], r["changed"], r["cursor"]) == (2, 2, 2, "changes:9")
+    assert (r["batches"], r["saved"], r["changed"], r["cursor"]) == (2, 2, 2, T + "changes:9")
     assert store.get_item(w.conn, w.alice, hit["id"])["version"] == 2
     assert [x["external_key"] for x in eng_docs(w)] == ["gdrive:d1", "gdrive:d2", "gdrive:d3", "gdrive:t1"]
     # The removed doc gets an ask_first archive proposal; the trashed one was never synced, so nothing to do.
@@ -162,9 +163,9 @@ def test_resume_mid_listing_and_errors(world):
     gen = drive(fake, page_size=2).fetch(None)
     first = next(gen)
     connectors.apply_batch(w.conn, w.bob, "gdrive", w.eng, first.records, first.cursor, None)
-    assert first.cursor == "list:6:2" and [r.key for r in first.records] == ["d0"]  # d1 export forbidden: skipped
+    assert first.cursor == T + "list:6:2" and [r.key for r in first.records] == ["d0"]  # d1 export forbidden: skipped
     r = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake, page_size=2))
-    assert r["saved"] == 3 and r["cursor"] == "changes:6"
+    assert r["saved"] == 3 and r["cursor"] == T + "changes:6"
     assert len(eng_docs(w)) == 4
 
     # Transient errors are retried; a rejected token without refresh credentials is a DriveError.
@@ -219,11 +220,11 @@ def test_folder_scope(world, monkeypatch):
     g = drive(fake, page_size=1)
     assert g.roots == ["eng"] and set(g.folders()) == {"eng", "specs"}
     r = connectors.run(w.conn, w.bob, "gdrive", w.eng, g)
-    assert r["saved"] == 2 and r["cursor"] == g.scope_tag + "changes:8"
+    assert r["saved"] == 2 and r["cursor"] == g.cursor_tag + "changes:8"
     assert [x["external_key"] for x in eng_docs(w)] == ["gdrive:a", "gdrive:b"]
     # The listing cursor names the folder chunk and page; resuming mid-listing works.
     log = w.conn.execute("select after from change_log where entity='sync_cursor' order by id").fetchall()
-    assert log[0]["after"]["cursor"].startswith(g.scope_tag + "list:8:0:")
+    assert log[0]["after"]["cursor"].startswith(g.cursor_tag + "list:8:0:")
     idle = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))
     assert (idle["batches"], idle["saved"], idle["deleted"]) == (0, 0, 0)
 
@@ -256,7 +257,7 @@ def test_folder_scope(world, monkeypatch):
     g2 = drive(fake, folders=["eng", "hr"])
     assert g2.scope_tag != g.scope_tag
     r = connectors.run(w.conn, w.bob, "gdrive", w.eng, g2)
-    assert r["cursor"].startswith(g2.scope_tag + "changes:")
+    assert r["cursor"].startswith(g2.cursor_tag + "changes:")
     assert "gdrive:c" in [x["external_key"] for x in eng_docs(w)]
 
     # Fail closed: a missing root or a file that isn't a folder is an error, not "everything was deleted".
@@ -266,3 +267,73 @@ def test_folder_scope(world, monkeypatch):
         connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake, folders=["e"]))
     with pytest.raises(DriveError, match="folder id"):
         drive(fake, folders=["x' or true"])
+
+
+def _pdf(text: str) -> bytes:
+    """A one-page PDF whose text layer is `text` (built by hand: pypdf can't write text)."""
+    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R"
+            b" /Resources << /Font << /F1 5 0 R >> >> >>",
+            b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    out, offsets = b"%PDF-1.4\n", []
+    for i, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    out += b"".join(b"%010d 00000 n \n" % off for off in offsets)
+    return out + b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+
+
+def _docx(*paragraphs: str) -> bytes:
+    import io
+
+    import docx
+
+    d = docx.Document()
+    for p in paragraphs:
+        d.add_paragraph(p)
+    buf = io.BytesIO()
+    d.save(buf)
+    return buf.getvalue()
+
+
+def test_pdf_and_docx_files(world, caplog):
+    w = world
+    fake = FakeDrive()
+    fake.add("p1", "Contract.pdf", PDF, _pdf("Renewal is due in March."))
+    fake.add("w1", "Plan.docx", DOCX, _docx("Q1 plan", "Hire two designers."))
+    fake.add("p2", "Scan.pdf", PDF, _pdf(""))             # no text layer: skipped (no OCR)
+    fake.add("p3", "Broken.pdf", PDF, b"not a pdf at all")  # unreadable: skipped, sync carries on
+    fake.add("d1", "Doc", GDOC, "a doc")
+
+    r = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))
+    assert r["saved"] == 3
+    assert [x["external_key"] for x in eng_docs(w)] == ["gdrive:d1", "gdrive:p1", "gdrive:w1"]
+    pdf = store.get_item(w.conn, w.alice, store.search(w.conn, w.alice, "renewal March")[0]["id"])
+    assert pdf["title"] == "Contract.pdf" and "Renewal is due in March." in pdf["body"]
+    assert pdf["metadata"]["mime_type"] == PDF and pdf["blob_sha256"] is None  # text only; Drive keeps the file
+    doc = store.get_item(w.conn, w.alice, store.search(w.conn, w.alice, "designers")[0]["id"])
+    assert doc["body"] == "Q1 plan\nHire two designers." and doc["metadata"]["mime_type"] == DOCX
+    assert "no text in .pdf" in caplog.text and "can't read .pdf" in caplog.text
+
+    # A new version of the .docx is a new item version; deleting the PDF proposes archiving it.
+    fake.add("w1", "Plan.docx", DOCX, _docx("Q1 plan", "Hire three designers."), modified="2026-11-02T00:00:00Z")
+    fake.remove("p1")
+    r = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))
+    assert (r["changed"], r["deleted"]) == (1, 1)
+    assert store.get_item(w.conn, w.alice, doc["id"])["version"] == 2
+
+
+def test_new_file_types_relist_existing_cursor(world):
+    """A cursor saved before more types were synced (no types tag) re-lists once, picking up existing PDFs."""
+    w = world
+    fake = FakeDrive()
+    fake.add("d1", "Doc", GDOC, "a doc")
+    fake.add("p1", "Old.pdf", PDF, _pdf("Board minutes from 2025."))
+    connectors.apply_batch(w.conn, w.bob, "gdrive", w.eng, [], "changes:3", None)
+    r = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))
+    assert r["saved"] == 2 and r["cursor"] == T + "changes:3"
+    assert connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))["batches"] == 0

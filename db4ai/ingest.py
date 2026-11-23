@@ -45,7 +45,11 @@ def _jsonable(v):
 
 
 def extract_text(path: Path, data: bytes) -> str:
-    ext = path.suffix.lower()
+    return text_from_bytes(path.suffix.lower(), data)
+
+
+def text_from_bytes(ext: str, data: bytes) -> str:
+    """Plain text of a file's bytes by extension: PDF pages, .docx paragraphs, anything else decoded as UTF-8."""
     if ext == ".pdf":
         from pypdf import PdfReader
 

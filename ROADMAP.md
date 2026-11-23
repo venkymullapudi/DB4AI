@@ -39,8 +39,11 @@ right priority, with a one-line reason.
       being ignored. Why: v1 sync only upserts, so deleted Drive files would live on.
 - [x] **Drive folder scoping.** Limit `gdrive` to chosen folders/shared drives. Why: v1 syncs every Doc/text file
       the token can read.
-- [ ] **More Drive file types.** Sync PDFs and .docx (text via the existing importers) and Sheets (as CSV →
-      structured datasets). Why: split from folder scoping; v1 only syncs Docs and text files.
+- [x] **More Drive file types.** Sync PDFs and .docx (text via the existing importers). Why: split from folder
+      scoping; v1 only synced Docs and text files.
+- [ ] **Drive Sheets as datasets.** Export Sheets as CSV into `data.*` tables (one per sheet/tab), with deletions and
+      schema drift going through the harness. Why: split from "More Drive file types"; datasets aren't items, so the
+      connector framework needs a dataset record kind first.
 - [ ] **`ask` follow-ups.** Optional audit log of questions asked (who asked what, which items were cited), and
       multi-turn context. Why: v1 `ask` is stateless and leaves no trace of what was read.
 - [ ] **Per-team notification routing.** Send a team's pending decisions to that team's channel (webhook URLs are
