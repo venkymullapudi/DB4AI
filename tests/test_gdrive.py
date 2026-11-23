@@ -1,11 +1,12 @@
 import json
+import re
 
 import httpx
 import pytest
 
 from db4ai import connectors, store
 from db4ai.cli import main
-from db4ai.gdrive import GDOC, DriveError, GoogleDrive, TokenSource
+from db4ai.gdrive import FOLDER, GDOC, DriveError, GoogleDrive, TokenSource
 
 
 class FakeDrive:
@@ -20,13 +21,26 @@ class FakeDrive:
         self.requests: list[httpx.Request] = []
         self.blocked: set[str] = set()     # files whose export is forbidden
 
-    def add(self, fid, name, mime, text, modified="2026-11-01T00:00:00Z", change=True):
+    def add(self, fid, name, mime, text, modified="2026-11-01T00:00:00Z", change=True, parent="root"):
         self.files[fid] = {"id": fid, "name": name, "mimeType": mime, "modifiedTime": modified,
                            "webViewLink": f"https://docs.google.com/d/{fid}", "trashed": False,
-                           "size": str(len(text))}
+                           "size": str(len(text)), "parents": [parent]}
         self.content[fid] = text
         if change:
             self.change_log.append({"fileId": fid, "removed": False, "file": dict(self.files[fid])})
+
+    def folder(self, fid, parent="root"):
+        self.add(fid, fid, FOLDER, "", parent=parent)
+
+    def move(self, fid, parent):
+        self.files[fid]["parents"] = [parent]
+        self.change_log.append({"fileId": fid, "removed": False, "file": dict(self.files[fid])})
+
+    @staticmethod
+    def matches(f, q):
+        mimes = re.findall(r"mimeType = '([^']+)'", q)
+        parents = re.findall(r"'([^']+)' in parents", q)
+        return (not mimes or f["mimeType"] in mimes) and (not parents or bool(set(f["parents"]) & set(parents)))
 
     def remove(self, fid):
         self.files.pop(fid)
@@ -49,7 +63,8 @@ class FakeDrive:
         if path == "/changes/startPageToken":
             return httpx.Response(200, json={"startPageToken": str(len(self.change_log) + 1)})
         if path == "/files":
-            ids = sorted(f for f in self.files if not self.files[f]["trashed"])
+            ids = sorted(f for f in self.files
+                         if not self.files[f]["trashed"] and self.matches(self.files[f], q.get("q", "")))
             size, start = int(q["pageSize"]), int(q.get("pageToken") or 0)
             page = ids[start:start + size]
             out = {"files": [self.files[i] for i in page]}
@@ -73,7 +88,9 @@ class FakeDrive:
             return httpx.Response(200, content=("﻿" + self.content[fid]).encode())
         if q.get("alt") == "media":
             return httpx.Response(200, content=self.content[fid].encode())
-        return httpx.Response(404)
+        if fid in self.files:
+            return httpx.Response(200, json=self.files[fid])
+        return httpx.Response(404, json={"error": {"errors": [{"reason": "notFound"}]}})
 
 
 def drive(fake, token="good", **kw):
@@ -185,3 +202,67 @@ def test_cli_gdrive_needs_token(db_url, monkeypatch, tmp_path, capsys):
         main(["sync", "gdrive", "--team", "eng", "--as", "dana"])
     with pytest.raises(SystemExit, match="not a folder"):
         main(["sync", "transcripts", "--team", "eng", "--as", "dana"])
+
+
+def test_folder_scope(world, monkeypatch):
+    w = world
+    fake = FakeDrive()
+    fake.folder("eng")
+    fake.folder("specs", parent="eng")
+    fake.folder("hr")
+    fake.add("a", "Roadmap", GDOC, "Roadmap for the API.", parent="eng")
+    fake.add("b", "Spec", GDOC, "Spec of the sync engine.", parent="specs")
+    fake.add("c", "Salaries", GDOC, "Confidential salaries.", parent="hr")
+    fake.add("d", "Loose", GDOC, "A loose doc at the root.")
+
+    monkeypatch.setenv("DB4AI_GDRIVE_FOLDERS", "eng")
+    g = drive(fake, page_size=1)
+    assert g.roots == ["eng"] and set(g.folders()) == {"eng", "specs"}
+    r = connectors.run(w.conn, w.bob, "gdrive", w.eng, g)
+    assert r["saved"] == 2 and r["cursor"] == g.scope_tag + "changes:8"
+    assert [x["external_key"] for x in eng_docs(w)] == ["gdrive:a", "gdrive:b"]
+    # The listing cursor names the folder chunk and page; resuming mid-listing works.
+    log = w.conn.execute("select after from change_log where entity='sync_cursor' order by id").fetchall()
+    assert log[0]["after"]["cursor"].startswith(g.scope_tag + "list:8:0:")
+    idle = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))
+    assert (idle["batches"], idle["saved"], idle["deleted"]) == (0, 0, 0)
+
+    # Changes outside the scope are ignored; a doc moved out of scope is a deletion; one moved in is synced.
+    fake.add("c", "Salaries", GDOC, "Confidential salaries, 2027.", parent="hr", modified="2026-11-03T00:00:00Z")
+    fake.move("a", "hr")
+    fake.move("d", "specs")
+    r = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))
+    assert (r["saved"], r["deleted"]) == (1, 1)
+    assert [x["external_key"] for x in eng_docs(w)] == ["gdrive:a", "gdrive:b", "gdrive:d"]
+    a = w.conn.execute("select id from items where external_key='gdrive:a'").fetchone()["id"]
+    [dec] = w.conn.execute("select payload from harness_decisions where action_type='archive_item'").fetchall()
+    assert dec["payload"]["item_id"] == str(a)
+
+    # A whole folder moving in brings its existing files; one moving out makes its synced files deletions.
+    fake.folder("ops", parent="hr")
+    fake.add("e", "Runbook", GDOC, "Runbook for on-call.", parent="ops")
+    fake.move("ops", "eng")
+    fake.move("specs", "hr")  # b and d leave the scope with their folder; no change is reported for them
+    r = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))
+    assert r["changed"] == 1 and r["deleted"] == 2
+    assert "gdrive:e" in [x["external_key"] for x in eng_docs(w)]
+    assert w.conn.execute("select count(*) n from harness_decisions where action_type='archive_item'"
+                          " and status='pending'").fetchone()["n"] == 3
+    # Re-running proposes nothing new.
+    again = connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake))
+    assert (again["changed"], again["deleted"]) == (0, 0)
+
+    # Changing the scope restarts with a full listing of the new scope.
+    g2 = drive(fake, folders=["eng", "hr"])
+    assert g2.scope_tag != g.scope_tag
+    r = connectors.run(w.conn, w.bob, "gdrive", w.eng, g2)
+    assert r["cursor"].startswith(g2.scope_tag + "changes:")
+    assert "gdrive:c" in [x["external_key"] for x in eng_docs(w)]
+
+    # Fail closed: a missing root or a file that isn't a folder is an error, not "everything was deleted".
+    with pytest.raises(DriveError, match="can't be read"):
+        connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake, folders=["nope"]))
+    with pytest.raises(DriveError, match="not a folder"):
+        connectors.run(w.conn, w.bob, "gdrive", w.eng, drive(fake, folders=["e"]))
+    with pytest.raises(DriveError, match="folder id"):
+        drive(fake, folders=["x' or true"])

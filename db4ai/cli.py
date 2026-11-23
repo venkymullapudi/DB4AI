@@ -58,6 +58,9 @@ def main(argv: list[str] | None = None) -> None:
     sy.add_argument("--team", required=True)
     sy.add_argument("--as", dest="actor", help="actor name to attribute the sync to")
     sy.add_argument("--source", help="cursor name (default: the connector name)")
+    sy.add_argument("--folder", action="append", dest="folders",
+                    help="gdrive: sync only this folder or shared drive id and everything below it (repeatable; "
+                         "default DB4AI_GDRIVE_FOLDERS, else all the token can read)")
 
     m = sub.add_parser("maintain", help="run maintainer jobs")
     m.add_argument("--once", action="store_true", help="drain the queue and exit")
@@ -115,7 +118,7 @@ def main(argv: list[str] | None = None) -> None:
         if a.connector == "gdrive":
             from .gdrive import DriveError, GoogleDrive
             try:
-                _out(connectors.run(conn, actor, a.source or a.connector, team_id, GoogleDrive()))
+                _out(connectors.run(conn, actor, a.source or a.connector, team_id, GoogleDrive(folders=a.folders)))
             except DriveError as e:
                 sys.exit(str(e))
             return

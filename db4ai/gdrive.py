@@ -7,6 +7,9 @@ Cursor (opaque to the framework, never holds content):
 * `list:<start>:<page>` while the first full listing is in progress: `<start>` is the changes start page token taken
   *before* listing, `<page>` the next `files.list` page. Changes made during the listing are picked up afterwards.
 * `changes:<token>` afterwards: the Drive changes API page token.
+* With folder scoping (`folders=` or `DB4AI_GDRIVE_FOLDERS`), the cursor is prefixed `scope:<hash>:`, a hash of the
+  chosen folder ids, and the listing cursor is `list:<start>:<chunk>:<page>`. A cursor from another scope starts a
+  fresh full listing, so adding a folder picks up its existing files.
 
 Each API page becomes one batch, so a crash resumes at the last page saved. Synced files: Google Docs (exported as
 plain text) and plain text / Markdown files. A removed or trashed file is reported as a deletion, which proposes
@@ -15,6 +18,7 @@ archiving its item through the harness.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
@@ -29,10 +33,13 @@ log = logging.getLogger(__name__)
 API = "https://www.googleapis.com/drive/v3"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 GDOC = "application/vnd.google-apps.document"
+FOLDER = "application/vnd.google-apps.folder"
+MAX_FOLDERS = 5000  # a scope larger than this is refused rather than half-synced
+PARENTS_PER_QUERY = 40  # `'<id>' in parents or ...` terms per files.list query
 TEXT_TYPES = {"text/plain", "text/markdown", "text/x-markdown"}
 SYNCED_TYPES = {GDOC, *TEXT_TYPES}
 MAX_BYTES = 10 * 1024 * 1024  # Drive's own export limit; larger text files are skipped
-FILE_FIELDS = "id,name,mimeType,modifiedTime,webViewLink,trashed,size"
+FILE_FIELDS = "id,name,mimeType,modifiedTime,webViewLink,trashed,size,parents"
 _ALL_DRIVES = {"supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
 
 
@@ -78,10 +85,26 @@ class TokenSource:
 
 class GoogleDrive:
     def __init__(self, tokens: TokenSource | None = None, http: httpx.Client | None = None, page_size: int = 100,
-                 retries: int = 4, sleep: Callable[[float], None] = time.sleep):
+                 retries: int = 4, sleep: Callable[[float], None] = time.sleep, folders: list[str] | None = None):
         self.http = http or httpx.Client(timeout=60)
         self.tokens = tokens or TokenSource.from_env(self.http)
         self.page_size, self.retries, self.sleep = page_size, retries, sleep
+        if folders is None:
+            folders = os.environ.get("DB4AI_GDRIVE_FOLDERS", "").split(",")
+        # Folder (or shared drive) ids to sync, with everything below them. Empty = all the account can read.
+        self.roots = sorted({f.strip() for f in folders if f and f.strip()})
+        for f in self.roots:
+            if "'" in f or "\\" in f:
+                raise DriveError(f"not a Drive folder id: {f!r}")
+        self._scope: dict[str, list[str]] | None = None  # folder id -> parent ids, resolved once per instance
+
+    @property
+    def scoped(self) -> bool:
+        return bool(self.roots)
+
+    @property
+    def scope_tag(self) -> str:
+        return "scope:" + hashlib.sha256(",".join(self.roots).encode()).hexdigest()[:12] + ":"
 
     # ------------------------------------------------------------ HTTP
 
@@ -119,11 +142,78 @@ class GoogleDrive:
             raise DriveError(f"Drive download of {f['id']} failed ({r.status_code}): {_reason(r)}")
         return r.content.decode("utf-8", errors="replace").lstrip("﻿").replace("\r\n", "\n").strip()
 
+    # ------------------------------------------------------------ folder scope
+
+    def folders(self) -> dict[str, list[str]]:
+        """Every folder in scope (the roots and all folders below them) → its parents. Fail closed: a root that is
+        missing, trashed or not a folder is an error, so a bad id can't look like "everything was deleted"."""
+        if self._scope is not None:
+            return self._scope
+        scope: dict[str, list[str]] = {}
+        for root in self.roots:
+            r = self._get(f"/files/{root}", {"fields": "id,mimeType,trashed", "supportsAllDrives": "true"})
+            if r.status_code != 200:
+                raise DriveError(f"Drive folder {root} can't be read ({r.status_code}): {_reason(r)}")
+            f = r.json()
+            if f.get("mimeType") != FOLDER or f.get("trashed"):
+                raise DriveError(f"Drive file {root} is not a folder (or is in the trash)")
+            scope[root] = []
+        frontier = list(self.roots)
+        while frontier:
+            found = []
+            for f in self._query(f"mimeType = '{FOLDER}' and trashed = false", frontier, "id,parents"):
+                if f["id"] not in scope:
+                    scope[f["id"]] = f.get("parents") or []
+                    found.append(f["id"])
+            if len(scope) > MAX_FOLDERS:
+                raise DriveError(f"Drive folder scope has more than {MAX_FOLDERS} folders; choose narrower folders")
+            frontier = found
+        self._scope = scope
+        return scope
+
+    def _in_scope(self, f: dict) -> bool:
+        return not self.scoped or bool(set(f.get("parents") or []) & self.folders().keys())
+
+    def _subtree(self, folder: str) -> list[str]:
+        """`folder` and the in-scope folders below it."""
+        scope, out, frontier = self.folders(), [folder], [folder]
+        while frontier:
+            frontier = [f for f, parents in scope.items() if set(parents) & set(frontier) and f not in out]
+            out += frontier
+        return out
+
+    def _query(self, q: str, parents: list[str], fields: str) -> Iterator[dict]:
+        """files.list for `q` restricted to children of `parents`, chunked so the query stays short."""
+        for i in range(0, len(parents), PARENTS_PER_QUERY):
+            yield from self._pages(_with_parents(q, parents[i:i + PARENTS_PER_QUERY]), fields)
+
+    def _pages(self, q: str, fields: str, page: str | None = None) -> Iterator[dict]:
+        while True:
+            params = {"q": q, "pageSize": self.page_size, "corpora": "allDrives",
+                      "fields": f"nextPageToken,files({fields})", **_ALL_DRIVES}
+            if page:
+                params["pageToken"] = page
+            data = self._json("/files", params)
+            yield from data.get("files", [])
+            page = data.get("nextPageToken")
+            if not page:
+                return
+
+    def deleted(self, known: set[str]) -> list[str]:
+        """Scoped syncs only: synced files no longer anywhere in scope (moved out, or their folder was) are
+        deletions. Changes to a file are already caught by the changes feed; a folder moving out isn't."""
+        if not self.scoped or not known:
+            return []
+        present = {f["id"] for f in self._query(_SYNCED_Q, list(self.folders()), "id")}
+        if not present:  # fail closed, as for transcripts: an empty scope reports nothing
+            return []
+        return sorted(known - present)
+
     # ------------------------------------------------------------ records
 
     def _wanted(self, f: dict | None) -> bool:
         return bool(f) and not f.get("trashed") and f.get("mimeType") in SYNCED_TYPES \
-            and int(f.get("size") or 0) <= MAX_BYTES
+            and int(f.get("size") or 0) <= MAX_BYTES and self._in_scope(f)
 
     def _records(self, files: list[dict]) -> list[Record]:
         out, seen = [], set()
@@ -144,6 +234,15 @@ class GoogleDrive:
     # ------------------------------------------------------------ sync
 
     def fetch(self, cursor: str | None) -> Iterator[Batch]:
+        tag = self.scope_tag if self.scoped else ""
+        if cursor and cursor.startswith("scope:") != bool(tag) or (tag and cursor and not cursor.startswith(tag)):
+            log.info("Drive folder scope changed: starting a full listing")
+            cursor = None
+        inner = cursor[len(tag):] if cursor else None
+        for b in self._fetch(inner):
+            yield Batch(b.records, tag + b.cursor, b.deleted)
+
+    def _fetch(self, cursor: str | None) -> Iterator[Batch]:
         if not cursor:
             start = self._json("/changes/startPageToken", {"supportsAllDrives": "true"})["startPageToken"]
             yield from self._list(start, None)
@@ -157,9 +256,11 @@ class GoogleDrive:
         yield from self._changes(cursor.split(":", 1)[1])
 
     def _list(self, start: str, page: str | None) -> Iterator[Batch]:
-        q = "trashed = false and (" + " or ".join(f"mimeType = '{m}'" for m in sorted(SYNCED_TYPES)) + ")"
+        if self.scoped:
+            yield from self._list_scoped(start, page)
+            return
         while True:
-            params = {"q": q, "pageSize": self.page_size, "corpora": "allDrives", "orderBy": "modifiedTime",
+            params = {"q": _SYNCED_Q, "pageSize": self.page_size, "corpora": "allDrives", "orderBy": "modifiedTime",
                       "fields": f"nextPageToken,files({FILE_FIELDS})", **_ALL_DRIVES}
             if page:
                 params["pageToken"] = page
@@ -171,6 +272,43 @@ class GoogleDrive:
                 return
             yield Batch(records, f"list:{start}:{page}")
 
+    def _list_scoped(self, start: str, resume: str | None) -> Iterator[Batch]:
+        """One files.list per chunk of in-scope folders; cursor `list:<start>:<chunk>:<page>`. Folders that change
+        while listing are replayed by the changes feed from `<start>`."""
+        folders = sorted(self.folders())
+        chunks = [folders[i:i + PARENTS_PER_QUERY] for i in range(0, len(folders), PARENTS_PER_QUERY)]
+        chunk, page = 0, None
+        if resume:
+            c, _, p = resume.partition(":")
+            chunk, page = int(c), p or None
+        for i in range(chunk, len(chunks)):
+            q = _with_parents(_SYNCED_Q, chunks[i])
+            while True:
+                params = {"q": q, "pageSize": self.page_size, "corpora": "allDrives",
+                          "fields": f"nextPageToken,files({FILE_FIELDS})", **_ALL_DRIVES}
+                if page:
+                    params["pageToken"] = page
+                data = self._json("/files", params)
+                page = data.get("nextPageToken")
+                records = self._records(data.get("files", []))
+                if page:
+                    yield Batch(records, f"list:{start}:{i}:{page}")
+                    continue
+                if i + 1 < len(chunks):
+                    yield Batch(records, f"list:{start}:{i + 1}:")
+                else:
+                    yield Batch(records, f"changes:{start}")
+                break
+
+    def _moved_in(self, folder: str, cursor: str) -> Iterator[Batch]:
+        """A folder that moved into scope (or was created there with files): its existing files don't show up in
+        the changes feed, so list them. The cursor doesn't move; re-sending is idempotent."""
+        files = list(self._query(_SYNCED_Q, self._subtree(folder), FILE_FIELDS))
+        for i in range(0, len(files), self.page_size):
+            records = self._records(files[i:i + self.page_size])
+            if records:
+                yield Batch(records, cursor)
+
     def _changes(self, token: str) -> Iterator[Batch]:
         while True:
             data = self._json("/changes", {
@@ -180,9 +318,17 @@ class GoogleDrive:
             changes = data.get("changes", [])
             # Removed (deleted, or the account lost access) or trashed: DB4AI can no longer read it from Drive, so
             # the framework proposes archiving the item (ask_first). The last change to a file in the page wins.
+            # With a folder scope, a file now outside it counts as removed too (unknown keys are ignored).
             last = {c.get("fileId") or (c.get("file") or {}).get("id"): c for c in changes}
             deleted = [fid for fid, c in last.items()
-                       if fid and (c.get("removed") or (c.get("file") or {}).get("trashed"))]
+                       if fid and (c.get("removed") or (c.get("file") or {}).get("trashed")
+                                   or (self.scoped and (c.get("file") or {}).get("mimeType") in SYNCED_TYPES
+                                       and not self._in_scope(c["file"])))]
+            if self.scoped:
+                for fid, c in last.items():
+                    f = c.get("file") or {}
+                    if f.get("mimeType") == FOLDER and not f.get("trashed") and fid in self.folders():
+                        yield from self._moved_in(fid, f"changes:{token}")
             records = self._records([c["file"] for fid, c in last.items() if fid not in deleted and c.get("file")])
             nxt = data.get("nextPageToken")
             new_start = data.get("newStartPageToken")
@@ -194,6 +340,13 @@ class GoogleDrive:
             if records or deleted or new_start != token:
                 yield Batch(records, f"changes:{new_start or token}", deleted)
             return
+
+
+_SYNCED_Q = "trashed = false and (" + " or ".join(f"mimeType = '{m}'" for m in sorted(SYNCED_TYPES)) + ")"
+
+
+def _with_parents(q: str, parents: list[str]) -> str:
+    return f"{q} and (" + " or ".join(f"'{p}' in parents" for p in parents) + ")"
 
 
 def _reason(r: httpx.Response) -> str:

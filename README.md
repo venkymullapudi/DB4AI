@@ -41,6 +41,8 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   cursor commit together, and a stale `expected_cursor` is a 409, so no batch is skipped or applied twice.
   `db4ai sync gdrive --team eng` syncs Google Docs (exported as text) and text/Markdown files from Google Drive
   (including shared drives) through the Drive changes API, with an OAuth token you supply in the environment.
+  `--folder <id>` (repeatable, or `DB4AI_GDRIVE_FOLDERS`) limits it to those folders or shared drives and everything
+  below them; files that leave the scope count as deleted.
   A file deleted (or trashed) in the source proposes archiving its item in the harness; nothing is archived until a
   team owner approves, and the proposal is withdrawn if the file comes back first.
 - **BI-ready.** Structured data lives in real tables (`data.<team>_<name>`), so Tableau, Metabase and others connect directly.
@@ -112,6 +114,7 @@ deployment, writes an item over HTTP, runs the maintainers and searches for it. 
 | `DB4AI_NOTIFY_WEBHOOKS` | — | comma-separated Slack/Teams incoming-webhook URLs notified of pending harness decisions; prefix `teams:` for a Teams Workflows webhook (Adaptive Card) |
 | `DB4AI_NOTIFY_DELAY_SECONDS` | `60` | wait before sending, so a burst of proposals becomes one message |
 | `DB4AI_GDRIVE_TOKEN` | — | Google Drive OAuth access token (scope `drive.readonly`) for `db4ai sync gdrive` |
+| `DB4AI_GDRIVE_FOLDERS` | — | comma-separated Drive folder / shared drive ids to limit `db4ai sync gdrive` to (default: everything the token can read) |
 | `DB4AI_GDRIVE_REFRESH_TOKEN`, `DB4AI_GDRIVE_CLIENT_ID`, `DB4AI_GDRIVE_CLIENT_SECRET` | — | instead of (or with) the access token: refresh it when it expires |
 | `DB4AI_PUBLIC_URL` | — | base URL of the web UI, used for the review link in notifications |
 | `DB4AI_LINK_THRESHOLD` / `DB4AI_DUP_THRESHOLD` | `0.55` / `0.92` | similarity thresholds |

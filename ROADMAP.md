@@ -37,8 +37,10 @@ right priority, with a one-line reason.
       Docs exported as text, OAuth token supplied by the owner via env). Why: split from the connector item.
 - [x] **Source deletions in connectors.** A record the source deleted proposes `archive_item` (ask_first) instead of
       being ignored. Why: v1 sync only upserts, so deleted Drive files would live on.
-- [ ] **Drive folder scoping and more file types.** Limit `gdrive` to chosen folders/shared drives, and sync PDFs,
-      .docx and Sheets (as CSV → structured datasets). Why: v1 syncs every Doc/text file the token can read.
+- [x] **Drive folder scoping.** Limit `gdrive` to chosen folders/shared drives. Why: v1 syncs every Doc/text file
+      the token can read.
+- [ ] **More Drive file types.** Sync PDFs and .docx (text via the existing importers) and Sheets (as CSV →
+      structured datasets). Why: split from folder scoping; v1 only syncs Docs and text files.
 - [ ] **`ask` follow-ups.** Optional audit log of questions asked (who asked what, which items were cited), and
       multi-turn context. Why: v1 `ask` is stateless and leaves no trace of what was read.
 - [ ] **Per-team notification routing.** Send a team's pending decisions to that team's channel (webhook URLs are

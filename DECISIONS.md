@@ -318,3 +318,32 @@ with (or after) CI against `pgvector/pgvector:pg16`.
   would otherwise propose archiving everything).
 - **Not owner-level:** no data is deleted or migrated (archiving is a reversible new version behind approval), no
   external service, no migration.
+
+
+## 2026-11-23 — Drive folder scoping
+Split from "Drive folder scoping and more file types": this run does scoping; file types is the next roadmap item.
+- **Q: How does the owner choose the scope?** `db4ai sync gdrive --folder <id>` (repeatable), else
+  `DB4AI_GDRIVE_FOLDERS` (comma-separated). Ids, not paths: names aren't unique in Drive and ids survive renames.
+  A shared drive id is also its root folder id, so the same option covers shared drives. Empty = unscoped (v1 behaviour).
+  Not stored in the DB: it's configuration next to the token, and a scope hash in the cursor detects changes.
+- **Q: Subfolders?** Included at any depth. The in-scope folder tree is resolved by BFS over `files.list`
+  (folder mimeType, `'<id>' in parents`, 40 parents per query) at the start of each sync, so it always reflects
+  Drive now. More than 5000 folders is refused rather than half-synced. A file is in scope if any parent is in the tree.
+- **Q: Fail closed?** A root that is missing, unreadable, trashed or not a folder is a `DriveError` before anything is
+  written. A typo must not make every synced file look deleted. Ids containing quotes/backslashes are rejected (they go
+  into Drive queries).
+- **Q: What if the scope changes between syncs?** The cursor is prefixed `scope:<sha256(sorted ids)[:12]>:`. A cursor
+  from another scope (or an unscoped one) starts a fresh full listing; re-sending is idempotent. Files no longer in
+  scope are then caught by the deletion check below. The hash holds only folder ids, no content.
+- **Q: Files moving out of scope?** A changed file of a synced type now outside the tree is reported as deleted
+  (`archive_item`, ask_first); unknown keys are ignored by the framework, so files that were never synced cost nothing.
+- **Q: Folders moving in or out?** The changes feed reports the folder, not its files. A changed folder inside the tree
+  has its subtree listed (batches that don't move the cursor, so a crash replays them). For folders moving out,
+  scoped syncs offer `deleted(known_keys)`: one metadata-only listing of the scope after the batches; synced live keys not
+  in it are deletions. As with transcripts, a scope that lists no files at all reports no deletions. Cost: one listing
+  per run, bounded by the scope the owner chose; unscoped syncs keep v1 behaviour and skip it.
+- **Q: Resume mid-listing?** Listing cursor `list:<start>:<chunk>:<page>` over the sorted folder tree. If the tree
+  changes between runs, the changes feed replays from `<start>` and the deletion check covers the rest.
+- **Tests:** the fake Drive now filters `q` by mimeType and parents and serves `files.get`; a new test covers nested
+  folders, moves in/out of files and folders, scope change, idempotent re-runs and fail-closed roots.
+- **Not owner-level:** no data is deleted (out-of-scope files go through ask_first archive), no new service, no migration.

@@ -125,6 +125,13 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   = changes token taken before listing), then `changes:<token>`; one batch per API page, an idle sync writes nothing.
   429/5xx/rate-limit 403s are retried with backoff; a file whose export Drive refuses (403/404) is skipped and logged.
   A removed (deleted or no longer shared) or trashed file is a deletion; the first full listing reports none.
+  **Folder scope** (`--folder <id>`, repeatable, or `DB4AI_GDRIVE_FOLDERS`; a shared drive id is its root folder): only
+  files under those folders, at any depth, are synced. The in-scope folder tree is resolved from Drive at each sync
+  (at most 5000 folders); a root that is missing, trashed or not a folder is an error (fail closed). The cursor is
+  prefixed `scope:<hash of the folder ids>:` and the listing cursor is `list:<start>:<chunk>:<page>`; a cursor from
+  another scope starts a fresh full listing. A file moved out of scope is a deletion; a folder moved in has its
+  existing files listed; after each scoped sync, synced files no longer anywhere in scope (e.g. their folder moved
+  out) are deletions too, unless the scope lists no files at all.
 - More connectors (Notion, Miro, Slack) build on the same framework.
 
 ## 7. Stack
