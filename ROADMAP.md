@@ -46,8 +46,10 @@ right priority, with a one-line reason.
       from "Drive Sheets as datasets"; datasets aren't items, so the framework needed a dataset record kind first.
 - [x] **Drive Sheets as datasets.** In `gdrive`, export each Sheet tab as CSV into a dataset record (key
       `<file id>#<sheet id>`), with removed tabs/files as `deleted_datasets`. Why: the connector half of the split item.
-- [ ] **`ask` follow-ups.** Optional audit log of questions asked (who asked what, which items were cited), and
-      multi-turn context. Why: v1 `ask` is stateless and leaves no trace of what was read.
+- [x] **`ask` audit log.** Optional log of questions asked (who asked what, which items were searched and cited).
+      Why: v1 `ask` left no trace of what was read. Split from "`ask` follow-ups".
+- [ ] **`ask` multi-turn context.** Follow-up questions that build on earlier ones. Why: the other half of the split
+      "`ask` follow-ups" item; v1 `ask` is stateless.
 - [ ] **Per-team notification routing.** Send a team's pending decisions to that team's channel (webhook URLs are
       secrets, so map team → env name, not URL, in the DB). Why: v1 sends every decision to every webhook.
 - [ ] "As of" queries: read any item or search results as they were at a given time.

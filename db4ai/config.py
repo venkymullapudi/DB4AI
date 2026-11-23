@@ -34,6 +34,8 @@ class Settings:
     notify_delay_seconds: float = field(default_factory=lambda: float(_env("DB4AI_NOTIFY_DELAY_SECONDS", "60")))
     # Base URL of the web UI, for the review link in notifications.
     public_url: str | None = field(default_factory=lambda: _env("DB4AI_PUBLIC_URL"))
+    # Audit log of `ask` calls: off | ids (ids, versions, question hash) | text (also the question).
+    ask_log: str = field(default_factory=lambda: _env("DB4AI_ASK_LOG", "off"))
     # Maintainer thresholds
     link_threshold: float = field(default_factory=lambda: float(_env("DB4AI_LINK_THRESHOLD", "0.55")))
     dup_threshold: float = field(default_factory=lambda: float(_env("DB4AI_DUP_THRESHOLD", "0.92")))

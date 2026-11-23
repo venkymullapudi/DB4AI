@@ -355,6 +355,9 @@ def _erase_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
                      (ERASED, item_id, item_id))
         _drop_derived(conn, item_id)
         data_rows = _scrub_data(conn, item_id, None, [0])
+        # `ask` audit rows that searched the item keep ids and the question hash; the question text goes.
+        conn.execute("update ask_log set question = null where %s = any(source_items) and question is not null",
+                     (item_id,))
 
         # Blobs: delete the row now (so nothing points at it after commit); the file goes via the outbox.
         deleted = kept = 0
@@ -431,6 +434,11 @@ def _redact_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
             conn.execute("update links set reason = %s where id = %s", (_replace(row["reason"], pat, counter), row["id"]))
         _drop_derived(conn, item_id)
         data_rows = _scrub_data(conn, item_id, pat, counter)
+        for row in conn.execute("select id, question from ask_log where %s = any(source_items)"
+                                " and question is not null", (item_id,)).fetchall():
+            q = _replace(row["question"], pat, counter)
+            if q != row["question"]:
+                conn.execute("update ask_log set question = %s where id = %s", (q, row["id"]))
     finally:
         _end(conn)
     # The request's own reason may quote a term; nothing written after the scrub may carry one.

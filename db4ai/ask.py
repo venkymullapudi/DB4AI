@@ -1,23 +1,32 @@
 """`ask`: answer a question from DB4AI items, citing the item ids and versions it used.
 
-Read-only: it retrieves with `store.search` (so team access, active-only and chunking all apply), hands the
+It retrieves with `store.search` (so team access, active-only and chunking all apply), hands the
 passages to the LLM and keeps only citations that point at a passage it was given. An answer without at least
 one quote copied verbatim from a passage is not returned (fail closed): `answered` is false and `answer` says
 nothing was found.
+
+Nothing about the items changes. With `DB4AI_ASK_LOG` set to `ids` or `text`, each call writes one `ask_log` row
+(who asked, the question's hash or text, which item versions were searched and cited) in the same transaction as
+the answer; if that write fails, no answer is returned.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
+from uuid import UUID
+
+from psycopg.types.json import Jsonb
 
 from . import store
 from .auth import Actor
 from .config import settings
-from .db import Conn
+from .db import Conn, transaction
 from .embeddings import chunk_spans, tokens
 
 NOT_FOUND = "I couldn't find an answer to that in DB4AI."
 MAX_QUESTION = 2000
+LOG_MODES = ("off", "ids", "text")
 
 
 def _norm(s: str) -> str:
@@ -49,8 +58,70 @@ def passages(conn: Conn, actor: Actor, question: str, *, embedder, limit: int = 
     return out
 
 
+def log_mode() -> str:
+    mode = (settings().ask_log or "off").strip().lower()
+    if mode not in LOG_MODES:
+        raise ValueError(f"DB4AI_ASK_LOG must be one of {', '.join(LOG_MODES)}, not {mode!r}")
+    return mode
+
+
+def question_hash(question: str) -> str:
+    return hashlib.sha256(_norm(question).encode()).hexdigest()
+
+
 def ask(conn: Conn, actor: Actor, question: str, *, llm, embedder, limit: int = 8,
         types: list[str] | None = None) -> dict:
+    mode = log_mode()  # checked first: a bad setting answers nothing
+    if mode == "off":
+        return _ask(conn, actor, question, llm=llm, embedder=embedder, limit=limit, types=types)
+    with transaction(conn):
+        result = _ask(conn, actor, question, llm=llm, embedder=embedder, limit=limit, types=types)
+        _log(conn, actor, result, types, mode)
+    return result
+
+
+def _pairs(rows: list[dict]) -> list[dict]:
+    out, seen = [], set()
+    for r in rows:
+        k = (str(r["item_id"]), r["version"])
+        if k not in seen:
+            seen.add(k)
+            out.append({"item_id": k[0], "version": k[1]})
+    return out
+
+
+def _log(conn: Conn, actor: Actor, result: dict, types: list[str] | None, mode: str) -> None:
+    sources, cited = _pairs(result["sources"]), _pairs(result["citations"])
+    conn.execute(
+        "insert into ask_log (actor_id, question_sha256, question, types, answered, model, sources, citations,"
+        " source_items, cited_items) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (actor.id, question_hash(result["question"]), result["question"] if mode == "text" else None, types,
+         result["answered"], result["model"], Jsonb(sources), Jsonb(cited),
+         list(dict.fromkeys(UUID(p["item_id"]) for p in sources)),
+         list(dict.fromkeys(UUID(p["item_id"]) for p in cited))))
+
+
+def log(conn: Conn, actor: Actor, *, actor_name: str | None = None, item_id: UUID | None = None,
+        limit: int = 50) -> list[dict]:
+    """Audit rows, newest first. Admins see every row; anyone else only their own."""
+    where, args = [], []
+    if not actor.is_admin:
+        where.append("l.actor_id = %s")
+        args.append(actor.id)
+    if actor_name:
+        where.append("a.name = %s")
+        args.append(actor_name)
+    if item_id:
+        where.append("%s = any(l.source_items)")
+        args.append(item_id)
+    sql = ("select l.id, a.name as actor, l.asked_at, l.question_sha256, l.question, l.types, l.answered, l.model,"
+           " l.sources, l.citations from ask_log l join actors a on a.id = l.actor_id"
+           + (" where " + " and ".join(where) if where else "") + " order by l.asked_at desc, l.id limit %s")
+    return conn.execute(sql, (*args, max(1, min(limit, 500)))).fetchall()
+
+
+def _ask(conn: Conn, actor: Actor, question: str, *, llm, embedder, limit: int,
+         types: list[str] | None) -> dict:
     question = question.strip()
     if not question:
         raise ValueError("question is required")

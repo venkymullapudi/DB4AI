@@ -118,3 +118,109 @@ def test_ask_over_http_and_mcp(world, db_url, monkeypatch):
     res = mcp_server.ask("When do deploys freeze?")
     assert res["answered"] and res["citations"][0]["version"] == 1
     mcp_server._conn.close()
+
+
+def _log_rows(w):
+    return w.conn.execute("select * from ask_log order by asked_at, id").fetchall()
+
+
+def test_ask_log_is_off_by_default_and_rejects_unknown_modes(world, monkeypatch):
+    import pytest
+    w = world
+    save(w, w.alice, w.eng, "Deploy freeze", "Deploys freeze on Fridays after 2pm.")
+    monkeypatch.delenv("DB4AI_ASK_LOG", raising=False)
+    assert ask(w.conn, w.bob, "When do deploys freeze?", llm=HeuristicLLM(), embedder=HashEmbedder())["answered"]
+    assert _log_rows(w) == []
+    monkeypatch.setenv("DB4AI_ASK_LOG", "everything")
+    with pytest.raises(ValueError):  # misconfigured: no answer rather than an unlogged (or over-logged) one
+        ask(w.conn, w.bob, "When do deploys freeze?", llm=HeuristicLLM(), embedder=HashEmbedder())
+    assert _log_rows(w) == []
+
+
+def test_ask_log_ids_mode_records_who_read_which_versions(world, monkeypatch):
+    from db4ai.ask import log, question_hash
+    w = world
+    monkeypatch.setenv("DB4AI_ASK_LOG", "ids")
+    r = save(w, w.alice, w.eng, "Deploy freeze", "Deploys freeze on Fridays after 2pm.")
+    res = ask(w.conn, w.bob, "When do deploys freeze?", llm=HeuristicLLM(), embedder=HashEmbedder())
+    ask(w.conn, w.carol, "When do deploys freeze?", llm=HeuristicLLM(), embedder=HashEmbedder())  # sees nothing
+    rows = _log_rows(w)
+    assert len(rows) == 2
+    bob = rows[0]
+    assert bob["actor_id"] == w.bob.id and bob["answered"] and bob["question"] is None
+    assert bob["question_sha256"] == question_hash("  when do DEPLOYS freeze? ")
+    assert bob["citations"] == [{"item_id": str(r["item_id"]), "version": res["citations"][0]["version"]}]
+    assert r["item_id"] in bob["source_items"] and bob["cited_items"] == [r["item_id"]]
+    assert "Fridays" not in str(bob)  # no answer, quote or title stored
+    assert not rows[1]["answered"] and rows[1]["sources"] == []
+    # admins see everything; others only their own rows; filters by actor and item
+    assert len(log(w.conn, w.root)) == 2
+    assert [x["actor"] for x in log(w.conn, w.bob)] == ["bob"]
+    assert [x["actor"] for x in log(w.conn, w.root, actor_name="carol")] == ["carol"]
+    assert [x["actor"] for x in log(w.conn, w.root, item_id=r["item_id"])] == ["bob"]
+    # append-only
+    import psycopg
+    import pytest
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        w.conn.execute("update ask_log set answered = false")
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        w.conn.execute("delete from ask_log")
+
+
+def test_ask_log_write_failure_returns_no_answer(world, monkeypatch):
+    import pytest
+    from db4ai import ask as ask_mod
+    w = world
+    monkeypatch.setenv("DB4AI_ASK_LOG", "text")
+    save(w, w.alice, w.eng, "Deploy freeze", "Deploys freeze on Fridays after 2pm.")
+
+    def boom(*a, **k):
+        raise RuntimeError("log down")
+    monkeypatch.setattr(ask_mod, "_log", boom)
+    with pytest.raises(RuntimeError):
+        ask(w.conn, w.bob, "When do deploys freeze?", llm=HeuristicLLM(), embedder=HashEmbedder())
+
+
+def test_ask_log_text_is_scrubbed_by_erasure_and_redaction(world, monkeypatch):
+    from db4ai import erasure, harness
+    w = world
+    monkeypatch.setenv("DB4AI_ASK_LOG", "text")
+    a = save(w, w.alice, w.eng, "Zanzibar Quill profile", "Zanzibar Quill lives at 12 Elm St.")["item_id"]
+    b = save(w, w.alice, w.eng, "Deploy freeze", "Deploys freeze on Fridays after 2pm. Ask Yolanda Brisk.")["item_id"]
+    ask(w.conn, w.bob, "Where does Zanzibar Quill live?", llm=HeuristicLLM(), embedder=HashEmbedder())
+    ask(w.conn, w.bob, "Yolanda Brisk deploy freeze?", llm=HeuristicLLM(), embedder=HashEmbedder())
+    rows = _log_rows(w)
+    assert a in rows[0]["source_items"] and b in rows[1]["source_items"]
+    assert rows[0]["question"] == "Where does Zanzibar Quill live?"
+
+    with w.conn.transaction():
+        d = erasure.request(w.conn, w.bob, b, reason="GDPR", terms=["Yolanda Brisk"])
+    harness.decide(w.conn, w.root, d["decision_id"], True)
+    with w.conn.transaction():
+        d = erasure.request(w.conn, w.bob, a, reason="GDPR")
+    harness.decide(w.conn, w.root, d["decision_id"], True)
+
+    after = {r["id"]: r for r in _log_rows(w)}
+    for r in rows:
+        x = after[r["id"]]
+        # ids, versions and the hash survive; only the question text changes
+        assert (x["question_sha256"], x["sources"], x["citations"]) == (r["question_sha256"], r["sources"], r["citations"])
+    assert a not in rows[1]["source_items"]
+    assert after[rows[1]["id"]]["question"] == "[redacted] deploy freeze?"
+    assert after[rows[0]["id"]]["question"] is None
+
+
+def test_ask_log_over_http(world, db_url, monkeypatch):
+    w = world
+    monkeypatch.setenv("DB4AI_LLM", "heuristic")
+    monkeypatch.setenv("DB4AI_ASK_LOG", "ids")
+    r = save(w, w.alice, w.eng, "Deploy freeze", "Deploys freeze on Fridays after 2pm.")
+    with TestClient(create_app(db_url)) as client:
+        hb, hr = ({"Authorization": f"Bearer {w.tokens[n]}"} for n in ("bob", "root"))
+        client.post("/ask", headers=hb, json={"question": "When do deploys freeze?"})
+        client.post("/ask", headers=hr, json={"question": "When do deploys freeze?"})
+        assert [x["actor"] for x in client.get("/ask/log", headers=hb).json()] == ["bob"]
+        assert len(client.get("/ask/log", headers=hr).json()) == 2
+        got = client.get("/ask/log", headers=hr, params={"actor": "bob", "item": str(r["item_id"])}).json()
+        assert [x["actor"] for x in got] == ["bob"] and got[0]["citations"][0]["item_id"] == str(r["item_id"])
+        assert client.get("/ask/log").status_code == 401

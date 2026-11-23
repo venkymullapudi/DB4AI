@@ -7,7 +7,7 @@ import html
 import json
 from typing import Iterator
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
@@ -180,6 +180,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.post("/ask")
     def post_ask(body: AskIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
         return service.ask(c, a, body.question, types=[body.type] if body.type else None, limit=body.limit)
+
+    @app.get("/ask/log")
+    def get_ask_log(actor_name: str | None = Query(None, alias="actor"), item: str | None = None, limit: int = 50,
+                    a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.ask_log(c, a, actor_name=actor_name, item_id=item, limit=limit)
 
     @app.get("/datasets/{name}")
     def get_dataset(name: str, team: str | None = None, limit: int = 100, a: Actor = Depends(actor), c: Conn = Depends(conn)):

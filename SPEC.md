@@ -99,7 +99,13 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   numbered passages to the LLM (heuristic: extractive sentences), and returns `answered`, `answer`, `citations`
   (item id, version, title, quote) and the `sources` searched. Citations to passages it wasn't given are dropped;
   a quote not found verbatim in its passage is kept as `null`. Without at least one verbatim quote the answer is not
-  returned (`answered: false`, fail closed). Read-only: no versions, decisions or logs are written.
+  returned (`answered: false`, fail closed). No versions or decisions are written.
+- **`ask` audit log** (opt-in, `DB4AI_ASK_LOG` = `off` default | `ids` | `text`; any other value makes `ask` fail):
+  each call writes one append-only `ask_log` row in the answer's transaction (a failed write returns no answer):
+  actor, time, `answered`, model, type filter, sources and citations as `(item_id, version)` pairs, and a sha256 of
+  the normalised question; `text` mode also keeps the question. Never the answer, quotes or titles. Erasing an item
+  nulls the question of rows that searched it; redacting replaces the terms in it (the only update the log allows).
+  `GET /ask/log` (`actor`, `item`, `limit`): admins see every row, others only their own.
 - CLI import of files/folders: md, txt, pdf, docx → items; csv → structured dataset.
 - Memory repo import: Markdown/Obsidian vault (frontmatter → metadata, `[[wikilinks]]` → links);
   re-import only adds versions for changed files.

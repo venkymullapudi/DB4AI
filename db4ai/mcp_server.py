@@ -89,7 +89,7 @@ def ask(question: str, type: str | None = None, limit: int = 8) -> dict[str, Any
     """Answer a question from DB4AI items you can access, citing the item ids and versions used.
 
     Returns `answered` (false if nothing relevant was found), `answer`, `citations` (item_id, version, title,
-    quote) and the `sources` searched. Read-only.
+    quote) and the `sources` searched. Changes nothing (an audit row is written if DB4AI_ASK_LOG is on).
     """
     c, a = _ctx()
     return service.ask(c, a, question, types=[type] if type else None, limit=limit)

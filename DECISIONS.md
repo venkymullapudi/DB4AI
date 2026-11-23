@@ -436,3 +436,25 @@ The connector half of the split item: `gdrive` now syncs Google Sheets tabs as d
   and pick up existing spreadsheets (idempotent for docs).
 - **Not owner-level:** no data deleted (tab/file removals go through ask_first `archive_dataset`), no new service, no
   new account or scope, no migration.
+
+
+## 2026-11-23 — `ask` audit log
+Split from "`ask` follow-ups": this run adds the audit log; multi-turn context stays on the roadmap as its own item.
+- **Q: On or off by default?** Off. The roadmap says "optional", and a question can itself be personal data ("what is
+  X's salary?"). `DB4AI_ASK_LOG` = `off` (default) | `ids` | `text`. An unknown value makes `ask` raise rather than
+  answer unlogged or log more than asked (fail closed on misconfiguration).
+- **Q: What is stored?** One `ask_log` row per call: actor, time, `answered`, model, type filter, the `sources` and
+  `citations` as `(item_id, version)` pairs (plus `source_items` / `cited_items` uuid arrays for lookups), and a sha256
+  of the normalised question. `text` mode also stores the question. Never the answer, passages, titles or quotes: they
+  are item content (rebuildable from the cited versions) and would widen erasure scope.
+- **Q: Same transaction?** Yes. With logging on, the answer is computed and the row inserted in one transaction; if
+  the insert fails, `ask` raises and returns nothing, so no answer is given without its trace.
+- **Q: Append-only?** Yes (trigger). The one exception is erasure: while an `erase_item`/`redact_item` decision is
+  applied, rows whose `source_items` contain the target may change `question` only. Erase nulls the question of those
+  rows (it may have been about the erased content); redact replaces the terms in it. Ids and versions stay: they
+  hold no content, like `notifications`.
+- **Q: Who reads it?** `GET /ask/log` (`actor`, `item`, `limit` filters): admins see every row, anyone else only their
+  own. No MCP tool: it is an audit surface for people, not for agents.
+- **Q: Retention?** None in v1 (deleting rows would be a new bypass of append-only; the log is opt-in). Raise as a
+  question if an owner turns it on and wants expiry.
+- **Not owner-level:** opt-in, no service, no account, one additive migration (`011_ask_log.sql`).
