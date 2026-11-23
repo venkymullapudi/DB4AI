@@ -188,6 +188,18 @@ def create_app(database_url: str | None = None) -> FastAPI:
                     a: Actor = Depends(actor), c: Conn = Depends(conn)):
         return service.ask_log(c, a, actor_name=actor_name, item_id=item, limit=limit)
 
+    @app.get("/teams/{team}/notify-routes")
+    def get_notify_routes(team: str, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.notify_routes(c, a, team)
+
+    @app.put("/teams/{team}/notify-routes/{env_name}")
+    def put_notify_route(team: str, env_name: str, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.add_notify_route(c, a, team, env_name)
+
+    @app.delete("/teams/{team}/notify-routes/{env_name}")
+    def delete_notify_route(team: str, env_name: str, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.remove_notify_route(c, a, team, env_name)
+
     @app.get("/datasets/{name}")
     def get_dataset(name: str, team: str | None = None, limit: int = 100, a: Actor = Depends(actor), c: Conn = Depends(conn)):
         return service.dataset_rows(c, a, name, team, limit)

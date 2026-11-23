@@ -90,6 +90,14 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   POST retries with the queue's backoff (at-least-once). Messages carry action type, team, confidence, proposer,
   expiry, decision id and a review link (`DB4AI_PUBLIC_URL`), never item content, reasons or diffs, since a chat
   message can't be erased later.
+- **Per-team routing**: `notify_routes` maps a team to the *name* of an env var (`DB4AI_WEBHOOK_<NAME>`, enforced by a
+  check constraint) that holds its webhook URL(s) in the same format; URLs never enter the database. Global webhooks
+  (`DB4AI_NOTIFY_WEBHOOKS`) still hear about every decision; a team route hears about its team's decisions except
+  admin-only actions (`erase_item`, `redact_item`). Webhooks are identified by a hash of the URL, so a URL that is both
+  global and routed gets one message. Routing is resolved when the decision is proposed (which jobs to queue) and again
+  at send time (which decisions to name); an unset variable is logged and skipped. Admins and owners of the team add or
+  remove routes (`PUT`/`DELETE /teams/{team}/notify-routes/{env_name}`, `db4ai notify-route`); members read them
+  (`GET`, showing whether the variable is set, never its value). Every change is in `change_log`.
 
 ## 6. Ingestion (push-based)
 - MCP write tools: `save_meeting`, `save_document`, `remember`, `log_decision`, `search`, `get_item`, `history`, `revert`,

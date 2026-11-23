@@ -22,3 +22,15 @@ def test_cli_end_to_end(db_url, monkeypatch, tmp_path, capsys):
     jobs = run(capsys, "maintain", "--once")
     assert {j["kind"] for j in jobs} >= {"enrich", "relate", "hygiene", "schema_scan"}
     assert not any("error" in j for j in jobs)
+
+
+def test_cli_notify_route(db_url, monkeypatch, capsys):
+    import pytest
+    monkeypatch.setenv("DB4AI_DATABASE_URL", db_url)
+    monkeypatch.setenv("DB4AI_WEBHOOK_OPS", "https://hooks.example/ops")
+    run(capsys, "user", "erin", "--team", "ops:owner")
+    assert run(capsys, "notify-route", "add", "ops", "DB4AI_WEBHOOK_OPS", "--as", "erin")["configured"] is True
+    assert [r["env_name"] for r in run(capsys, "notify-route", "list", "ops", "--as", "erin")] == ["DB4AI_WEBHOOK_OPS"]
+    assert run(capsys, "notify-route", "remove", "ops", "DB4AI_WEBHOOK_OPS", "--as", "erin") == {"removed": "DB4AI_WEBHOOK_OPS"}
+    with pytest.raises(SystemExit):
+        main(["notify-route", "add", "ops", "HOME", "--as", "erin"])

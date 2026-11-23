@@ -62,6 +62,12 @@ def main(argv: list[str] | None = None) -> None:
                     help="gdrive: sync only this folder or shared drive id and everything below it (repeatable; "
                          "default DB4AI_GDRIVE_FOLDERS, else all the token can read)")
 
+    nr = sub.add_parser("notify-route", help="route a team's pending harness decisions to a webhook held in an env var")
+    nr.add_argument("op", choices=["add", "remove", "list"])
+    nr.add_argument("team")
+    nr.add_argument("env_name", nargs="?", help="DB4AI_WEBHOOK_<NAME>: the env var holding the webhook URL")
+    nr.add_argument("--as", dest="actor", required=True, help="an admin, or an owner of the team")
+
     m = sub.add_parser("maintain", help="run maintainer jobs")
     m.add_argument("--once", action="store_true", help="drain the queue and exit")
 
@@ -125,6 +131,18 @@ def main(argv: list[str] | None = None) -> None:
         if a.path is None or not a.path.is_dir():
             sys.exit(f"{a.path} is not a folder")
         _out(connectors.run(conn, actor, a.source or a.connector, team_id, connectors.TranscriptFolder(a.path)))
+    elif a.cmd == "notify-route":
+        from . import service
+
+        with conn.transaction():
+            actor = _actor(conn, a.actor)
+        if a.op != "list" and not a.env_name:
+            sys.exit("env_name is required")
+        fn = {"add": service.add_notify_route, "remove": service.remove_notify_route}.get(a.op)
+        try:
+            _out(fn(conn, actor, a.team, a.env_name) if fn else service.notify_routes(conn, actor, a.team))
+        except (KeyError, ValueError, auth.AccessDenied) as e:
+            sys.exit(str(e))
     elif a.cmd == "maintain":
         from .maintainers import Context
         from .worker import run_forever, run_until_idle, schedule_periodic

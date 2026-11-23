@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from db4ai import harness, notify, store, worker
-from db4ai.auth import maintainer_agent
+from db4ai.auth import AccessDenied, maintainer_agent
 from db4ai.db import Provenance, transaction
 
 SECRET = "Project Nightingale budget is 4.2M"
@@ -156,3 +156,112 @@ def test_real_http_post(world, monkeypatch):
         assert len(got) == 1 and "archive_item" in got[0]["text"]
     finally:
         srv.shutdown()
+
+
+# ------------------------------------------------------------ per-team routing
+
+def team_item(w, team):
+    prov = Provenance(w.root.id, "test")
+    with transaction(w.conn, prov):
+        return store.save_item(w.conn, w.root, prov, team_id=team, type="memory", title="t", body="b")["item_id"]
+
+
+def test_team_route_gets_only_its_team(world, sent, monkeypatch):
+    w = world
+    monkeypatch.setenv("DB4AI_NOTIFY_WEBHOOKS", "https://hooks.example/admins")
+    monkeypatch.setenv("DB4AI_WEBHOOK_ENG", "teams:https://hooks.example/eng")
+    monkeypatch.setenv("DB4AI_WEBHOOK_SALES", "https://hooks.example/sales")
+    notify.add_route(w.conn, w.alice, w.eng, "DB4AI_WEBHOOK_ENG")      # an owner routes their own team
+    notify.add_route(w.conn, w.root, w.sales, "DB4AI_WEBHOOK_SALES")   # an admin routes any team
+    de = propose(w, "archive_item", {"item_id": str(team_item(w, w.eng))})["decision_id"]
+    ds = propose(w, "archive_item", {"item_id": str(team_item(w, w.sales))})["decision_id"]
+    assert len(notify_jobs(w)) == 3
+    drain(w)
+    by_url = {url: json.dumps(p) for url, p in sent}
+    assert set(by_url) == {"https://hooks.example/admins", "https://hooks.example/eng", "https://hooks.example/sales"}
+    assert str(de) in by_url["https://hooks.example/admins"] and str(ds) in by_url["https://hooks.example/admins"]
+    assert str(de) in by_url["https://hooks.example/eng"] and str(ds) not in by_url["https://hooks.example/eng"]
+    assert "AdaptiveCard" in by_url["https://hooks.example/eng"]
+    assert str(ds) in by_url["https://hooks.example/sales"] and str(de) not in by_url["https://hooks.example/sales"]
+
+
+def test_admin_only_actions_skip_team_routes(world, sent, monkeypatch):
+    from db4ai import erasure
+    w = world
+    monkeypatch.setenv("DB4AI_WEBHOOK_ENG", "https://hooks.example/eng")
+    notify.add_route(w.conn, w.alice, w.eng, "DB4AI_WEBHOOK_ENG")
+    i = team_item(w, w.eng)
+    with w.conn.transaction():
+        erasure.request(w.conn, w.alice, i, reason="GDPR request")
+    assert notify_jobs(w) == []  # no global webhook, and the team channel never hears about erasures
+    monkeypatch.setenv("DB4AI_NOTIFY_WEBHOOKS", "https://hooks.example/admins")
+    propose(w, "archive_item", {"item_id": str(i)})
+    drain(w)
+    eng = [p for url, p in sent if url.endswith("/eng")]
+    admins = [p for url, p in sent if url.endswith("/admins")]
+    assert "erase_item" not in json.dumps(eng) and "archive_item" in json.dumps(eng)
+    assert "erase_item" in json.dumps(admins)
+
+
+def test_same_url_global_and_routed_is_one_message(world, sent, monkeypatch):
+    w = world
+    monkeypatch.setenv("DB4AI_NOTIFY_WEBHOOKS", "https://hooks.example/one")
+    monkeypatch.setenv("DB4AI_WEBHOOK_ENG", "https://hooks.example/one")
+    notify.add_route(w.conn, w.alice, w.eng, "DB4AI_WEBHOOK_ENG")
+    propose(w, "archive_item", {"item_id": str(team_item(w, w.eng))})
+    drain(w)
+    assert len(sent) == 1
+
+
+def test_unset_env_var_and_removed_route(world, sent, monkeypatch, caplog):
+    w = world
+    notify.add_route(w.conn, w.alice, w.eng, "DB4AI_WEBHOOK_ENG")
+    assert notify.routes(w.conn, w.bob, w.eng) == [
+        {"team_id": w.eng, "env_name": "DB4AI_WEBHOOK_ENG", "configured": False}]
+    propose(w, "archive_item", {"item_id": str(team_item(w, w.eng))})
+    assert notify_jobs(w) == [] and "DB4AI_WEBHOOK_ENG is not set" in caplog.text
+    monkeypatch.setenv("DB4AI_WEBHOOK_ENG", "https://hooks.example/eng")
+    propose(w, "archive_item", {"item_id": str(team_item(w, w.eng))})
+    assert len(notify_jobs(w)) == 1
+    assert notify.remove_route(w.conn, w.alice, w.eng, "DB4AI_WEBHOOK_ENG")
+    drain(w)  # route removed before the job ran: nothing sent
+    assert sent == []
+    log = w.conn.execute("select op, before, after from change_log where entity='notify_route' order by id").fetchall()
+    assert [r["op"] for r in log] == ["add", "remove"]
+    assert "hooks.example" not in json.dumps([dict(r) for r in log], default=str)  # never the URL
+
+
+def test_route_access_and_validation(world):
+    w = world
+    with pytest.raises(AccessDenied):
+        notify.add_route(w.conn, w.bob, w.eng, "DB4AI_WEBHOOK_ENG")     # member, not owner
+    with pytest.raises(AccessDenied):
+        notify.add_route(w.conn, w.alice, w.sales, "DB4AI_WEBHOOK_X")   # owner of another team
+    with pytest.raises(AccessDenied):
+        notify.routes(w.conn, w.carol, w.eng)
+    for bad in ("DB4AI_GDRIVE_TOKEN", "DB4AI_WEBHOOK_", "db4ai_webhook_eng", "DB4AI_WEBHOOK_A-B"):
+        with pytest.raises(ValueError):
+            notify.add_route(w.conn, w.alice, w.eng, bad)
+    notify.add_route(w.conn, w.alice, w.eng, "DB4AI_WEBHOOK_ENG")
+    notify.add_route(w.conn, w.alice, w.eng, "DB4AI_WEBHOOK_ENG")  # idempotent, logged once
+    assert w.conn.execute("select count(*) n from change_log where entity='notify_route'").fetchone()["n"] == 1
+    assert not notify.remove_route(w.conn, w.alice, w.eng, "DB4AI_WEBHOOK_OTHER")
+
+
+def test_routes_http(db_url, world, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from db4ai.api import create_app
+    w = world
+    monkeypatch.setenv("DB4AI_WEBHOOK_ENG", "https://hooks.example/secret-path")
+    h = {"authorization": f"Bearer {w.tokens['alice']}"}
+    with TestClient(create_app(db_url)) as client:
+        r = client.put("/teams/eng/notify-routes/DB4AI_WEBHOOK_ENG", headers=h)
+        assert r.status_code == 200 and r.json()["configured"] is True
+        got = client.get("/teams/eng/notify-routes", headers=h)
+        assert got.json()[0]["env_name"] == "DB4AI_WEBHOOK_ENG" and "secret-path" not in got.text
+        bob = {"authorization": f"Bearer {w.tokens['bob']}"}
+        assert client.put("/teams/eng/notify-routes/DB4AI_WEBHOOK_X", headers=bob).status_code == 403
+        assert client.put("/teams/eng/notify-routes/HOME", headers=h).status_code == 400
+        assert client.delete("/teams/eng/notify-routes/DB4AI_WEBHOOK_ENG", headers=h).status_code == 200
+        assert client.delete("/teams/eng/notify-routes/DB4AI_WEBHOOK_ENG", headers=h).status_code == 404

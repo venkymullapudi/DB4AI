@@ -485,3 +485,30 @@ The other half of "`ask` follow-ups". Grilled one question at a time; each answe
   are not stored: they were logged by their own call if made through DB4AI, and a client-supplied history may be
   invented. Carried items appear in `sources` like any passage, so erasure already finds those rows.
 - **Not owner-level:** no new service, no stored content, one additive migration (`012_ask_history.sql`).
+
+## 2026-11-24 — Per-team notification routing
+Grilled one question at a time; each answer is the recommended one, resolved from the code.
+- **Q: Where does the mapping live and what does it hold?** A `notify_routes` table (team, env var name, created by,
+  created at), as the roadmap says: the URL is a secret and stays in the environment. The variable's value uses the same
+  format as `DB4AI_NOTIFY_WEBHOOKS` (`slack:`/`teams:` prefix, comma-separated), so one parser serves both.
+- **Q: Can a route name any env var?** No. Names must match `DB4AI_WEBHOOK_<A-Z0-9_>` (checked in code and by a check
+  constraint). Otherwise an owner could point a route at `DB4AI_GDRIVE_TOKEN` or `DB4AI_DATABASE_URL` and have the
+  worker POST to (and log errors about) a secret.
+- **Q: What happens to the global webhooks?** Unchanged: they still hear about every decision. They act as the admin
+  feed, existing installs behave the same, and admin-only decisions need somewhere to go. Team routes are additive.
+- **Q: Do team channels hear about erasure/redaction?** No. Only admins can decide them, and even an id-only message
+  "erase_item proposed for team eng" can reveal that someone filed a GDPR request. They go to global webhooks only.
+  Decisions with no team (global scope) also go to global webhooks only.
+- **Q: The same URL configured globally and for a team?** One webhook (id = hash of the URL, as before); its scope is
+  the union, so it gets one message and `notifications` dedupe still holds.
+- **Q: When is routing resolved?** Twice: at propose time to decide which jobs to queue (in the proposing transaction,
+  as before), and at send time to decide which decisions to name. So removing a route or unsetting a variable before
+  the job runs sends nothing, like removing a global webhook did. An unset variable is logged as a warning, not an
+  error: notifications aren't a safety gate (decisions stay pending and visible in `/harness`), so nothing fails open.
+- **Q: Who manages routes?** Admins and owners of the team, matching `set_policy`. Members (and only readers of the
+  team) can list them; listings say whether the variable is set, never its value. Each add/remove is a `change_log`
+  row (entity `notify_route`, env var name only); removal deletes the config row. Surfaces: HTTP
+  (`GET`/`PUT`/`DELETE /teams/{team}/notify-routes[/{env_name}]`) and CLI (`db4ai notify-route add|remove|list --as`).
+  No MCP tool: this is operator configuration, not something an agent should change. The CLI needs `--as` rather than
+  inventing an admin identity.
+- **Not owner-level:** no data deleted, no new service or account, one additive migration (`013_notify_routes.sql`).

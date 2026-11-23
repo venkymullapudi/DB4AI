@@ -106,6 +106,23 @@ def revert_decision(conn: Conn, actor: Actor, decision_id: str, note: str | None
     return jsonable(harness.revert(conn, actor, UUID(decision_id), note))
 
 
+def notify_routes(conn: Conn, actor: Actor, team: str) -> list[dict]:
+    from . import notify
+    return jsonable(notify.routes(conn, actor, team_id_by_name(conn, team)))
+
+
+def add_notify_route(conn: Conn, actor: Actor, team: str, env_name: str) -> dict:
+    from . import notify
+    return jsonable(notify.add_route(conn, actor, team_id_by_name(conn, team), env_name))
+
+
+def remove_notify_route(conn: Conn, actor: Actor, team: str, env_name: str) -> dict:
+    from . import notify
+    if not notify.remove_route(conn, actor, team_id_by_name(conn, team), env_name):
+        raise KeyError(f"no route {env_name!r} for team {team!r}")
+    return {"removed": env_name}
+
+
 def dataset_rows(conn: Conn, actor: Actor, name: str, team: str | None = None, limit: int = 100) -> list[dict]:
     tid = team_id_by_name(conn, team) if team else resolve_team(conn, actor, None)
     return jsonable(datasets.query(conn, actor, tid, name, limit))
