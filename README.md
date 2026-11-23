@@ -40,7 +40,8 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   `POST /sync/{source}` (`items`, `deleted`, `cursor`, `expected_cursor`) and read `GET /sync/{source}/cursor`: the items and the
   cursor commit together, and a stale `expected_cursor` is a 409, so no batch is skipped or applied twice.
   `db4ai sync gdrive --team eng` syncs Google Docs (exported as text), text/Markdown files, and PDFs and .docx files (text extracted) from Google Drive
-  (including shared drives) through the Drive changes API, with an OAuth token you supply in the environment.
+  (including shared drives), and each Google Sheets tab as a dataset table `data.<team>_<name>` (diffed on every change;
+  column changes and removed tabs wait for approval in the harness), through the Drive changes API, with an OAuth token you supply in the environment.
   `--folder <id>` (repeatable, or `DB4AI_GDRIVE_FOLDERS`) limits it to those folders or shared drives and everything
   below them; files that leave the scope count as deleted.
   A file deleted (or trashed) in the source proposes archiving its item in the harness; nothing is archived until a

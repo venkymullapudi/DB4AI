@@ -17,6 +17,10 @@ once and picks up existing files of the new types (re-sending is idempotent).
 Each API page becomes one batch, so a crash resumes at the last page saved. Synced files: Google Docs (exported as
 plain text), plain text / Markdown files, and PDF / .docx files (text extracted with the file importers). A removed or trashed file is reported as a deletion, which proposes
 archiving its item through the harness.
+
+Google Sheets are synced as datasets, not items: each grid tab is read through the Sheets API (formatted values, first
+row = header) and sent as a `DatasetRecord` keyed `<file id>#<sheet id>`, in its own batch at the cursor the page
+started from. Tabs that disappear, and every tab of a removed spreadsheet, are reported in `deleted_datasets`.
 """
 
 from __future__ import annotations
@@ -29,22 +33,27 @@ from typing import Callable, Iterator
 
 import httpx
 
-from .connectors import Batch, Record
+from . import datasets
+from .connectors import MAX_BATCH, Batch, DatasetRecord, Record
 from .ingest import text_from_bytes
 
 log = logging.getLogger(__name__)
 
 API = "https://www.googleapis.com/drive/v3"
+SHEETS_API = "https://sheets.googleapis.com/v4"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 GDOC = "application/vnd.google-apps.document"
 FOLDER = "application/vnd.google-apps.folder"
+SHEET = "application/vnd.google-apps.spreadsheet"
+MAX_CELLS = 5_000_000  # a tab whose grid is larger is skipped (Sheets allows 10M cells per spreadsheet)
+TABS_PER_QUERY = 50    # ranges per values:batchGet
 MAX_FOLDERS = 5000  # a scope larger than this is refused rather than half-synced
 PARENTS_PER_QUERY = 40  # `'<id>' in parents or ...` terms per files.list query
 TEXT_TYPES = {"text/plain", "text/markdown", "text/x-markdown"}
 PDF = "application/pdf"
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 BINARY_TYPES = {PDF: ".pdf", DOCX: ".docx"}  # downloaded, then text extracted like a CLI import
-SYNCED_TYPES = {GDOC, *TEXT_TYPES, *BINARY_TYPES}
+SYNCED_TYPES = {GDOC, SHEET, *TEXT_TYPES, *BINARY_TYPES}
 TYPES_TAG = "types:" + hashlib.sha256(",".join(sorted(SYNCED_TYPES)).encode()).hexdigest()[:8] + ":"
 MAX_BYTES = 10 * 1024 * 1024  # Drive's own export limit; larger text files are skipped
 FILE_FIELDS = "id,name,mimeType,modifiedTime,webViewLink,trashed,size,parents"
@@ -105,6 +114,9 @@ class GoogleDrive:
             if "'" in f or "\\" in f:
                 raise DriveError(f"not a Drive folder id: {f!r}")
         self._scope: dict[str, list[str]] | None = None  # folder id -> parent ids, resolved once per instance
+        self._present: set[str] | None = None  # synced file ids in scope, listed once for the deletion checks
+        # Dataset keys (`<file id>#<sheet id>`) DB4AI holds as live; set by connectors.run, kept current as we emit.
+        self.known_datasets: set[str] = set()
 
     @property
     def scoped(self) -> bool:
@@ -125,7 +137,7 @@ class GoogleDrive:
     def _get(self, path: str, params: dict | None = None) -> httpx.Response:
         refreshed = False
         for attempt in range(self.retries + 1):
-            r = self.http.get(f"{API}{path}", params=params,
+            r = self.http.get(path if path.startswith("https://") else f"{API}{path}", params=params,
                               headers={"Authorization": f"Bearer {self.tokens.get()}"})
             if r.status_code == 401 and not refreshed and self.tokens.can_refresh:
                 self.tokens.refresh()
@@ -231,10 +243,24 @@ class GoogleDrive:
         deletions. Changes to a file are already caught by the changes feed; a folder moving out isn't."""
         if not self.scoped or not known:
             return []
-        present = {f["id"] for f in self._query(_SYNCED_Q, list(self.folders()), "id")}
+        present = self._present_ids()
         if not present:  # fail closed, as for transcripts: an empty scope reports nothing
             return []
         return sorted(known - present)
+
+    def deleted_datasets(self, known: set[str]) -> list[str]:
+        """Scoped syncs only: tabs of spreadsheets no longer anywhere in scope (as `deleted`, for datasets)."""
+        if not self.scoped or not known:
+            return []
+        present = self._present_ids()
+        if not present:
+            return []
+        return sorted(k for k in known if k.split("#", 1)[0] not in present)
+
+    def _present_ids(self) -> set[str]:
+        if self._present is None:
+            self._present = {f["id"] for f in self._query(_SYNCED_Q, list(self.folders()), "id")}
+        return self._present
 
     # ------------------------------------------------------------ records
 
@@ -245,7 +271,7 @@ class GoogleDrive:
     def _records(self, files: list[dict]) -> list[Record]:
         out, seen = [], set()
         for f in files:
-            if not self._wanted(f) or f["id"] in seen:
+            if not self._wanted(f) or f["id"] in seen or f["mimeType"] == SHEET:
                 continue
             seen.add(f["id"])
             body = self._content(f)
@@ -258,6 +284,88 @@ class GoogleDrive:
                               metadata=meta))
         return out
 
+    # ------------------------------------------------------------ spreadsheets → datasets
+
+    def _tab_keys(self, fid: str) -> set[str]:
+        return {k for k in self.known_datasets if k.startswith(fid + "#")}
+
+    def _gone(self, fids: list[str]) -> list[str]:
+        """Dataset keys of removed spreadsheets (every tab DB4AI holds for them)."""
+        out = sorted(k for fid in fids for k in self._tab_keys(fid))
+        self.known_datasets.difference_update(out)
+        return out
+
+    def _tabs(self, f: dict) -> tuple[list[DatasetRecord], set[str]] | None:
+        """Snapshots of a spreadsheet's grid tabs, plus the keys of every grid tab it has (including skipped ones),
+        or None when the Sheets API won't hand it over (then nothing is reported deleted)."""
+        fid, base = f["id"], f.get("name") or f["id"]
+        r = self._get(f"{SHEETS_API}/spreadsheets/{fid}",
+                      {"fields": "sheets.properties(sheetId,title,sheetType,gridProperties(rowCount,columnCount))"})
+        if r.status_code in (403, 404):
+            log.warning("skipping Drive spreadsheet %s: %s (%s)", fid, _reason(r), r.status_code)
+            return None
+        if r.status_code != 200:
+            raise DriveError(f"Sheets read of {fid} failed ({r.status_code}): {_reason(r)}")
+        grid = [s["properties"] for s in r.json().get("sheets", [])
+                if s.get("properties", {}).get("sheetType", "GRID") == "GRID"]
+        present = {f"{fid}#{p['sheetId']}" for p in grid}
+        wanted = []
+        for p in grid:
+            g = p.get("gridProperties") or {}
+            if int(g.get("rowCount") or 0) * int(g.get("columnCount") or 0) > MAX_CELLS:
+                log.warning("skipping tab %s of Drive spreadsheet %s: more than %d cells", p["sheetId"], fid, MAX_CELLS)
+            else:
+                wanted.append(p)
+        values: list[list] = []
+        for i in range(0, len(wanted), TABS_PER_QUERY):
+            ranges = ["'" + str(p.get("title", "")).replace("'", "''") + "'" for p in wanted[i:i + TABS_PER_QUERY]]
+            r = self._get(f"{SHEETS_API}/spreadsheets/{fid}/values:batchGet",
+                          {"ranges": ranges, "valueRenderOption": "FORMATTED_VALUE", "majorDimension": "ROWS"})
+            if r.status_code in (403, 404):
+                log.warning("skipping Drive spreadsheet %s: %s (%s)", fid, _reason(r), r.status_code)
+                return None
+            if r.status_code != 200:
+                raise DriveError(f"Sheets read of {fid} failed ({r.status_code}): {_reason(r)}")
+            values += [vr.get("values") or [] for vr in r.json().get("valueRanges", [])]
+        if len(values) != len(wanted):
+            raise DriveError(f"Sheets returned {len(values)} ranges for {len(wanted)} tabs of {fid}")
+        out = []
+        for p, rows in zip(wanted, values):
+            rows = [["" if c is None else str(c) for c in row] for row in rows]
+            rows = [row for row in rows if any(c.strip() for c in row)]  # blank spacer rows aren't data
+            if not rows:
+                continue
+            width = max(len(row) for row in rows)
+            header = rows[0] + [""] * (width - len(rows[0]))  # a column with values but no header is still data
+            try:
+                datasets.check_snapshot(header, rows[1:])
+            except ValueError as e:
+                log.warning("skipping tab %s of Drive spreadsheet %s: %s", p["sheetId"], fid, e)
+                continue
+            name = base if len(grid) == 1 else f"{base} {p.get('title') or p['sheetId']}"
+            out.append(DatasetRecord(key=f"{fid}#{p['sheetId']}", name=name, columns=header, rows=rows[1:]))
+        return out, present
+
+    def _sheet_batches(self, files: list[dict], here: str) -> Iterator[Batch]:
+        """One or more batches per changed spreadsheet, all at `here` (the cursor the page started from), so a crash
+        replays the page and a page of large spreadsheets never becomes one huge transaction."""
+        seen = set()
+        for f in files:
+            if not f or f.get("mimeType") != SHEET or not self._wanted(f) or f["id"] in seen:
+                continue
+            seen.add(f["id"])
+            tabs = self._tabs(f)
+            if tabs is None:
+                continue
+            recs, present = tabs
+            gone = sorted(self._tab_keys(f["id"]) - present)
+            self.known_datasets.difference_update(gone)
+            self.known_datasets.update(r.key for r in recs)
+            for i in range(0, len(recs), MAX_BATCH):
+                yield Batch([], here, datasets=recs[i:i + MAX_BATCH])
+            for i in range(0, len(gone), MAX_BATCH):
+                yield Batch([], here, deleted_datasets=gone[i:i + MAX_BATCH])
+
     # ------------------------------------------------------------ sync
 
     def fetch(self, cursor: str | None) -> Iterator[Batch]:
@@ -269,7 +377,7 @@ class GoogleDrive:
             cursor = None
         inner = cursor[len(tag):] if cursor else None
         for b in self._fetch(inner):
-            yield Batch(b.records, tag + b.cursor, b.deleted)
+            yield Batch(b.records, tag + b.cursor, b.deleted, b.datasets, b.deleted_datasets)
 
     def _fetch(self, cursor: str | None) -> Iterator[Batch]:
         if not cursor:
@@ -294,6 +402,7 @@ class GoogleDrive:
             if page:
                 params["pageToken"] = page
             data = self._json("/files", params)
+            yield from self._sheet_batches(data.get("files", []), f"list:{start}:{page or ''}")
             page = data.get("nextPageToken")
             records = self._records(data.get("files", []))
             if not page:
@@ -318,6 +427,7 @@ class GoogleDrive:
                 if page:
                     params["pageToken"] = page
                 data = self._json("/files", params)
+                yield from self._sheet_batches(data.get("files", []), f"list:{start}:{i}:{page or ''}")
                 page = data.get("nextPageToken")
                 records = self._records(data.get("files", []))
                 if page:
@@ -334,6 +444,7 @@ class GoogleDrive:
         the changes feed, so list them. The cursor doesn't move; re-sending is idempotent."""
         files = list(self._query(_SYNCED_Q, self._subtree(folder), FILE_FIELDS))
         for i in range(0, len(files), self.page_size):
+            yield from self._sheet_batches(files[i:i + self.page_size], cursor)
             records = self._records(files[i:i + self.page_size])
             if records:
                 yield Batch(records, cursor)
@@ -358,16 +469,19 @@ class GoogleDrive:
                     f = c.get("file") or {}
                     if f.get("mimeType") == FOLDER and not f.get("trashed") and fid in self.folders():
                         yield from self._moved_in(fid, f"changes:{token}")
-            records = self._records([c["file"] for fid, c in last.items() if fid not in deleted and c.get("file")])
+            changed = [c["file"] for fid, c in last.items() if fid not in deleted and c.get("file")]
+            yield from self._sheet_batches(changed, f"changes:{token}")
+            records = self._records(changed)
+            gone = self._gone(deleted)
             nxt = data.get("nextPageToken")
             new_start = data.get("newStartPageToken")
             if nxt:
-                yield Batch(records, f"changes:{nxt}", deleted)
+                yield Batch(records, f"changes:{nxt}", deleted, deleted_datasets=gone)
                 token = nxt
                 continue
             # Last page: only yield if something changed or the token moved, so an idle sync writes nothing.
-            if records or deleted or new_start != token:
-                yield Batch(records, f"changes:{new_start or token}", deleted)
+            if records or deleted or gone or new_start != token:
+                yield Batch(records, f"changes:{new_start or token}", deleted, deleted_datasets=gone)
             return
 
 

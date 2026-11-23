@@ -404,3 +404,35 @@ Sheets export in `gdrive` is the next roadmap item.
   separate future concern (noted, not needed for any current item).
 - **Not owner-level:** no data deleted (no column drops, archive keeps the table), no service, one additive migration
   (`010_synced_datasets.sql`).
+
+
+## 2026-11-23 — Drive Sheets as datasets
+The connector half of the split item: `gdrive` now syncs Google Sheets tabs as dataset records.
+- **Q: How is a tab read?** Sheets API v4 (`spreadsheets.get` for the tab list, then `values:batchGet` for the grid
+  tabs), not the `docs.google.com/.../export?format=csv&gid=` URL: that URL isn't a documented API, and Drive's own
+  `files.export` as CSV only gives the first tab. The `drive.readonly` token already covers Sheets reads, so no new
+  scope or env var. Values are `FORMATTED_VALUE` (what a CSV export holds and what people see), so "$1,200" stays text
+  and only plain numbers/ISO dates are typed; chart/object tabs are skipped.
+- **Q: Key and name?** Key `<file id>#<sheetId>` (sheetId survives tab renames and reordering). Name on first sync:
+  the file name when the spreadsheet has one grid tab, else `<file name> <tab title>`; later renames are ignored by the
+  framework (BI keeps its table).
+- **Q: Header and rows?** First row is the header; fully empty rows are dropped (blank spacer lines aren't data); a
+  tab with no values is skipped (present, not deleted). The API trims trailing empty cells, so short rows are padded by
+  the framework as nulls. A value to the right of the last header cell is still data: the header is padded to the
+  widest row and those columns are named `column`, `column_2`...
+- **Q: A tab the framework would reject (>200 columns, >100,000 rows, or a grid over 5M cells)?** Skipped and logged, keeping the last good snapshot, so one odd tab can't block the whole sync (same rule
+  as an unreadable PDF). A spreadsheet the Sheets API refuses (403/404) is skipped likewise, and its tabs aren't
+  reported deleted.
+- **Q: How does the connector know which tabs it synced before (to report a removed tab or a removed file's tabs)?**
+  New optional framework hook: `run` sets `connector.known_datasets` to the source's live dataset keys (no pending or
+  rejected archive) before fetching, and the connector keeps it current as it emits. A removed/trashed/out-of-scope
+  spreadsheet reports every known `<file id>#*` key in `deleted_datasets`; a changed spreadsheet reports its known tabs
+  that are gone. A second optional hook, `deleted_datasets(known)`, runs after the batches like `deleted(known)`; scoped
+  syncs use it (sharing one listing with `deleted`) for spreadsheets whose folder moved out.
+- **Q: Batch size and crashes?** Each spreadsheet's tabs go in their own batch(es) (≤500 records) at the cursor the
+  page started from, before the page's batch that moves the cursor; a crash replays the page, and snapshots are
+  idempotent. One huge page can't build one giant transaction.
+- **Q: Existing installs?** Adding the Sheets type changes the cursor `types:` tag, so existing cursors re-list once
+  and pick up existing spreadsheets (idempotent for docs).
+- **Not owner-level:** no data deleted (tab/file removals go through ask_first `archive_dataset`), no new service, no
+  new account or scope, no migration.

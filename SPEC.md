@@ -132,7 +132,9 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   closed); a newer drift supersedes an older pending one (status `expired`), and a rejected drift is not re-proposed.
   `alter_dataset` never drops or narrows a column and can't be reverted. A deleted key proposes `archive_dataset`
   (ask_first; payload dataset id and `source_deleted`), withdrawn if the snapshot comes back first; approved, the table
-  stays and later snapshots are ignored until the decision is reverted.
+  stays and later snapshots are ignored until the decision is reverted. Optional connector hooks: `run` sets
+  `connector.known_datasets` (the source's live dataset keys with no pending/rejected archive) before fetching, and calls
+  `connector.deleted_datasets(known)` after the batches, like `deleted`.
 - Built in: `gdrive` (`db4ai sync gdrive --team <t>`): Google Docs (exported as `text/plain`), text/Markdown files,
   and PDF / .docx files (downloaded; text extracted as by the CLI importer, file not stored as a blob), ≤10 MB, that the
   token's account can read, shared drives included, as `document` items (key = Drive file id; metadata
@@ -150,6 +152,14 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   another scope starts a fresh full listing. A file moved out of scope is a deletion; a folder moved in has its
   existing files listed; after each scoped sync, synced files no longer anywhere in scope (e.g. their folder moved
   out) are deletions too, unless the scope lists no files at all.
+  **Google Sheets** are synced as datasets, not items: each grid tab (chart tabs ignored) is read with the Sheets API
+  (`values:batchGet`, `FORMATTED_VALUE`, i.e. what a CSV export holds) as a dataset record keyed `<file id>#<sheetId>`,
+  named after the file (one grid tab) or `<file name> <tab title>`. First row = header, padded to the widest row
+  (unnamed columns become `column`, `column_2`...); fully empty rows are dropped; an empty tab is skipped. A tab over the
+  dataset limits (200 columns, 100,000 rows) or a 5M-cell grid is skipped and logged, keeping its last snapshot; a
+  spreadsheet the Sheets API refuses (403/404) is skipped and nothing is reported deleted. Each spreadsheet's tabs go in
+  their own batch(es) at the cursor its page started from, before the page's batch. A tab removed from a spreadsheet,
+  and every tab of a removed/trashed/out-of-scope spreadsheet, is reported in `deleted_datasets` (→ `archive_dataset`).
 - More connectors (Notion, Miro, Slack) build on the same framework.
 
 ## 7. Stack

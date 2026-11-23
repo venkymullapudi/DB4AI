@@ -44,7 +44,7 @@ right priority, with a one-line reason.
 - [x] **Dataset records in the connector framework.** Batches carry full table snapshots that are diffed into `data.*`
       tables, with schema drift (`alter_dataset`) and deletions (`archive_dataset`) going through the harness. Why: split
       from "Drive Sheets as datasets"; datasets aren't items, so the framework needed a dataset record kind first.
-- [ ] **Drive Sheets as datasets.** In `gdrive`, export each Sheet tab as CSV into a dataset record (key
+- [x] **Drive Sheets as datasets.** In `gdrive`, export each Sheet tab as CSV into a dataset record (key
       `<file id>#<sheet id>`), with removed tabs/files as `deleted_datasets`. Why: the connector half of the split item.
 - [ ] **`ask` follow-ups.** Optional audit log of questions asked (who asked what, which items were cited), and
       multi-turn context. Why: v1 `ask` is stateless and leaves no trace of what was read.

@@ -65,6 +65,11 @@ class Connector(Protocol):
     # Optional, for sources whose cursor can't see deletions (e.g. a folder): given the keys DB4AI holds as live,
     # return those the source no longer has. Called by `run` after the batches.
     # def deleted(self, known: set[str]) -> list[str]: ...
+    # Optional, for connectors that emit dataset records: `run` sets `known_datasets` (live dataset keys of the
+    # source) before fetching, so the connector can report tabs/files that went away; and calls
+    # `deleted_datasets(known)` after the batches, like `deleted`.
+    # known_datasets: set[str]
+    # def deleted_datasets(self, known: set[str]) -> list[str]: ...
 
 
 def _check_source(source: str) -> str:
@@ -240,6 +245,8 @@ def apply_batch(conn: Conn, actor: Actor, source: str, team_id: UUID, records: l
 def run(conn: Conn, actor: Actor, source: str, team_id: UUID, connector: Connector) -> dict:
     """Pull every batch after the stored cursor and apply them in order."""
     cursor = get_cursor(conn, actor, source, team_id)["cursor"]
+    if hasattr(connector, "known_datasets"):
+        connector.known_datasets = live_dataset_keys(conn, actor, source, team_id)
     total = {"source": source, "batches": 0, "saved": 0, "changed": 0, "erased": 0, "deleted": 0,
              "datasets": 0, "datasets_deleted": 0, "cursor": cursor}
 
@@ -258,7 +265,26 @@ def run(conn: Conn, actor: Actor, source: str, team_id: UUID, connector: Connect
         gone = connector.deleted(live_keys(conn, actor, source, team_id))
         for i in range(0, len(gone), MAX_BATCH):
             add(apply_batch(conn, actor, source, team_id, [], cursor, cursor, gone[i:i + MAX_BATCH]))
+    if hasattr(connector, "deleted_datasets"):
+        gone = connector.deleted_datasets(live_dataset_keys(conn, actor, source, team_id))
+        for i in range(0, len(gone), MAX_BATCH):
+            add(apply_batch(conn, actor, source, team_id, [], cursor, cursor, deleted_datasets=gone[i:i + MAX_BATCH]))
     return total
+
+
+def live_dataset_keys(conn: Conn, actor: Actor, source: str, team_id: UUID) -> set[str]:
+    """Source keys of the team's unarchived datasets from `source`, minus those whose deletion is already pending or
+    was rejected (as `live_keys` does for items)."""
+    actor.require_write(team_id)
+    prefix = f"{_check_source(source)}:"
+    rows = conn.execute(
+        "select substr(ds.external_key, %s) as key from datasets ds"
+        " where ds.team_id=%s and left(ds.external_key, %s)=%s and ds.archived_at is null"
+        " and not exists (select 1 from harness_decisions d where d.action_type='archive_dataset'"
+        "   and d.payload->>'dataset_id' = ds.id::text and d.payload->>'source_deleted'=%s"
+        "   and d.status in ('pending','rejected'))",
+        (len(prefix) + 1, team_id, len(prefix), prefix, source)).fetchall()
+    return {r["key"] for r in rows}
 
 
 def live_keys(conn: Conn, actor: Actor, source: str, team_id: UUID) -> set[str]:
