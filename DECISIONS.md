@@ -535,3 +535,20 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
 - **Q: Index/migration?** None. Item lookups use `unique (item_id, version)`; as-of search scans versions up to T,
   fine for a rare audit query. Add an index if it shows up in practice.
 - **Not owner-level:** read-only, no migration, no new service.
+
+## 2026-11-24 — `ask` as of a time
+Grilled one question at a time; each answer is the recommended one, resolved from the code.
+- **Q: How does `ask` retrieve as of T?** With `store.search_as_of` (full-text over each item's version at or before T),
+  for both the question and the follow-up retry with the previous question. Vector scores stay skipped, as for as-of
+  search: chunks and embeddings only exist for current content.
+- **Q: Which text is the passage?** The best-matching window of the version that matched (fetched by
+  `(item_id, version)`), never the current body. Citations carry that old version, and the verbatim-quote check runs
+  against the old text, so a quote from today's text can't ground an answer about then.
+- **Q: History-carried items?** Re-read as of T under the same rules as as-of search: readable team, version then
+  `active`, type filter, and items erased since dropped. Unknown or unreadable ids drop silently, as for live follow-ups.
+- **Q: Erasure?** Items erased since never come back (search excludes them; carried items too). Erasure stays complete.
+- **Q: Audit?** Additive column `ask_log.as_of` (null for live questions), so the log says which point in time was read;
+  the `(item_id, version)` pairs already pin the exact text. `GET /ask/log` returns it.
+- **Q: Result shape?** Unchanged, plus `as_of` echoed when given. Bad timestamps are a 400 via `parse_as_of`.
+- **Surfaces:** `POST /ask` body `as_of`, MCP `ask(as_of=...)`, `service.ask`. No CLI `ask` exists, so none added.
+- **Not owner-level:** read-only, one additive migration (`014_ask_as_of.sql`), no new service.

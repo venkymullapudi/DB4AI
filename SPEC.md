@@ -121,6 +121,10 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   (newest first) are added as passages after re-reading them under the same access, active-only and type filters as
   search (unreadable or unknown ids are dropped silently). The model sees the earlier turns marked as not citable;
   the grounding rule is unchanged. `ask_log.history_turns` records how many turns were supplied, not their text.
+- **As of a time**: `ask` takes `as_of` (same format as §"As of" reads). Retrieval is the as-of full-text search
+  (each item's version at or before then, status filter applied to the status then, items erased since left out);
+  passages, carried history items and citations all use those versions, so a quote must be in the old text. The
+  result echoes `as_of`; `ask_log.as_of` records it (null for live questions).
 - **`ask` audit log** (opt-in, `DB4AI_ASK_LOG` = `off` default | `ids` | `text`; any other value makes `ask` fail):
   each call writes one append-only `ask_log` row in the answer's transaction (a failed write returns no answer):
   actor, time, `answered`, model, type filter, sources and citations as `(item_id, version)` pairs, and a sha256 of

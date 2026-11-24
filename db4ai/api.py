@@ -48,6 +48,7 @@ class AskIn(BaseModel):
     type: str | None = None
     limit: int = 8
     history: list[dict] | None = None  # earlier turns: {question, answer, citations: [{item_id}]}, oldest first
+    as_of: str | None = None  # ISO 8601: answer from items as they read then (full-text retrieval)
 
 
 class SyncItemIn(BaseModel):
@@ -182,7 +183,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.post("/ask")
     def post_ask(body: AskIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
         return service.ask(c, a, body.question, types=[body.type] if body.type else None, limit=body.limit,
-                           history=body.history)
+                           history=body.history, as_of=body.as_of)
 
     @app.get("/ask/log")
     def get_ask_log(actor_name: str | None = Query(None, alias="actor"), item: str | None = None, limit: int = 50,

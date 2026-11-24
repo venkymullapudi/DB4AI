@@ -14,7 +14,7 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   where it came from and why. Database triggers block `UPDATE`/`DELETE` on history. Undo is a new version.
 - **Time travel.** `GET /items/{id}?as_of=<ISO time>` returns the item and its links as they were then;
   `GET /search?q=...&as_of=<ISO time>` searches items as they read then (full-text only). MCP `get_item`/`search`
-  take the same `as_of`.
+  take the same `as_of`, and so does `ask` (`POST /ask` body field), which then answers and cites the old versions.
 - **Erasure and redaction.** The one exception to append-only: an admin-approved harness decision can erase an
   item's content from every version, blob, embedding, audit row and related decision (`POST /items/{id}/erase`), or
   replace chosen terms with `[redacted]` everywhere (`POST /items/{id}/redact`). Anyone who can read the item can

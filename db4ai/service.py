@@ -73,10 +73,10 @@ def search(conn: Conn, actor: Actor, query: str, *, types: list[str] | None = No
 
 
 def ask(conn: Conn, actor: Actor, question: str, *, types: list[str] | None = None, limit: int = 8,
-        history: list[dict] | None = None, llm=None) -> dict:
+        history: list[dict] | None = None, llm=None, as_of: str | datetime | None = None) -> dict:
     """Answer from items the actor can read, citing item ids and versions. Logged if DB4AI_ASK_LOG is on."""
     return jsonable(ask_mod.ask(conn, actor, question, llm=llm or get_llm(), embedder=get_embedder(),
-                                types=types, limit=limit, history=history))
+                                types=types, limit=limit, history=history, as_of=parse_as_of(as_of)))
 
 
 def ask_log(conn: Conn, actor: Actor, *, actor_name: str | None = None, item_id: str | None = None,
