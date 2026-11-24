@@ -155,6 +155,14 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   cursor move is in `change_log`. Cursors are opaque and never hold content. Re-sending is idempotent, and an erased
   item's key is withheld, so a sync can't bring it back. Surfaces: `POST /sync/{source}`, `GET /sync/{source}/cursor`,
   `db4ai sync <connector> <path>`.
+- **Readers on synced records**: a record may carry `readers` (actor names who can read it in the source; None = the
+  source says nothing, and access is never changed). Names that aren't members of the team (unknown actors, other
+  teams) are dropped and reported as `readers_dropped`: access only narrows. A new item is created restricted to the
+  rest plus the syncing actor (so later syncs can still write it), in the batch's transaction. For an existing item
+  whose ACL differs from that set, the batch proposes `set_item_access` (always ask_first, source
+  `connector:<source>`, payload `source_readers` and `acl_changes` = the item's ACL change count, so a re-sent batch
+  is the same decision, a rejected change isn't re-proposed, and a later real change is a new decision). A newer reader
+  set from the source withdraws (status `expired`) a pending one from that source, as does a set that matches the ACL.
 - **Source deletions**: a batch can also carry `deleted` keys (counted toward the 500). Each one whose item in the team
   is active or stale gets an `archive_item` proposal in the same transaction (source `connector:<source>`, payload
   item id, `for_version` and `source_deleted`; no key or title), tiered by `policies` (`ask_first` by default). Unknown,

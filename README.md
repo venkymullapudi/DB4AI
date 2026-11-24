@@ -52,6 +52,9 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   and only reads files newer than its cursor on the next run. Connectors that run elsewhere push batches to
   `POST /sync/{source}` (`items`, `deleted`, `cursor`, `expected_cursor`) and read `GET /sync/{source}/cursor`: the items and the
   cursor commit together, and a stale `expected_cursor` is a 409, so no batch is skipped or applied twice.
+  An item can carry `readers` (actor names who can read it in the source): a new item is created restricted to them
+  (plus the syncer); names outside the team are dropped. When the source's readers change later, the sync proposes
+  `set_item_access` for an owner to approve.
   `db4ai sync gdrive --team eng` syncs Google Docs (exported as text), text/Markdown files, and PDFs and .docx files (text extracted) from Google Drive
   (including shared drives), and each Google Sheets tab as a dataset table `data.<team>_<name>` (diffed on every change;
   column changes and removed tabs wait for approval in the harness), through the Drive changes API, with an OAuth token you supply in the environment.

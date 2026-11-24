@@ -39,6 +39,10 @@ class Record:
     title: str
     body: str = ""
     metadata: dict = field(default_factory=dict)
+    # Actor names who may read the item in the source (e.g. a file's permissions). None = the source says nothing
+    # (the whole team, or the item's current access stays). Names that aren't members of the team are dropped:
+    # access only narrows. See `_sync_readers`.
+    readers: list[str] | None = None
 
 
 @dataclass
@@ -110,6 +114,45 @@ def _propose_deletion(conn: Conn, actor: Actor, source: str, team_id: UUID, key:
                             reason=f"deleted in {source}", source=f"connector:{source}")
         out = {"key": key, "item_id": row["id"], "decision_id": d["decision_id"], "status": d["status"]}
     return out
+
+
+def _team_readers(conn: Conn, team_id: UUID, names: list[str]) -> tuple[list[UUID], list[str]]:
+    """Resolve reader names to members of the team; the rest (unknown actors, other teams) are returned as dropped."""
+    names = sorted(set(names))
+    rows = conn.execute("select a.id, a.name from actors a join team_members m on m.actor_id = a.id"
+                        " where m.team_id = %s and a.name = any(%s)", (team_id, names)).fetchall()
+    found = {r["name"]: r["id"] for r in rows}
+    return [found[n] for n in names if n in found], [n for n in names if n not in found]
+
+
+def _sync_readers(conn: Conn, actor: Actor, prov: Provenance, source: str, item_id: UUID,
+                  readers: list[UUID]) -> dict | None:
+    """The source's readers of an existing item differ from its ACL: propose `set_item_access` (always ask_first).
+
+    The syncing actor stays a reader so the next sync can still write the item. The payload names the ACL state it
+    was computed from (`acl_changes`), so a re-sent batch is the same decision while a later, real change in the
+    source is a new one. An older pending proposal from this source is withdrawn when the source moves again (or
+    back to what the item already has)."""
+    want = sorted({*readers, actor.id}, key=str)
+    have = store.item_readers(conn, item_id)
+    acl_changes = conn.execute("select count(*) as n from change_log where entity='item_acl' and entity_id=%s",
+                               (str(item_id),)).fetchone()["n"]
+    payload = {"item_id": str(item_id), "readers": [str(r) for r in want], "source_readers": source,
+               "acl_changes": acl_changes}
+    fp = harness.fingerprint("set_item_access", payload)
+    if have is not None and set(have) == set(want):
+        fp = None  # nothing to change: withdraw anything pending from this source
+    for r in conn.execute(
+            "update harness_decisions set status='expired', decision_note=%s"
+            " where status='pending' and action_type='set_item_access' and payload->>'item_id'=%s"
+            " and payload->>'source_readers'=%s and fingerprint is distinct from %s::text returning id",
+            (f"superseded by a newer sync from {source}", str(item_id), source, fp)).fetchall():
+        log_change(conn, prov, "harness", str(r["id"]), "withdraw", after={"reason": "superseded"})
+    if fp is None:
+        return None
+    d = harness.propose(conn, actor, "set_item_access", payload,
+                        reason=f"readers changed in {source}", source=f"connector:{source}")
+    return {"decision_id": d["decision_id"], "status": d["status"]}
 
 
 def _dataset_by_key(conn: Conn, team_id: UUID, external_key: str, lock: bool = False) -> dict | None:
@@ -200,7 +243,7 @@ def apply_batch(conn: Conn, actor: Actor, source: str, team_id: UUID, records: l
         datasets.check_snapshot(d.columns, d.rows)
     prov = Provenance(actor.id, f"connector:{source}", f"sync {source}")
     out = {"source": source, "saved": 0, "changed": 0, "erased": 0, "deleted": 0, "items": [], "deletions": [],
-           "datasets": [], "datasets_deleted": 0}
+           "datasets": [], "datasets_deleted": 0, "access_proposed": 0}
     with transaction(conn, prov):
         conn.execute("insert into sync_cursors (source, team_id) values (%s,%s) on conflict do nothing",
                      (source, team_id))
@@ -209,15 +252,27 @@ def apply_batch(conn: Conn, actor: Actor, source: str, team_id: UUID, records: l
         if row["cursor"] != expected_cursor:
             raise CursorConflict(f"cursor for {source} moved (expected {expected_cursor!r}, found {row['cursor']!r})")
         for rec in records:
+            ext = f"{source}:{rec.key}"
+            readers, dropped = (None, []) if rec.readers is None else _team_readers(conn, team_id, rec.readers)
+            exists = readers is not None and conn.execute(
+                "select 1 from items where team_id=%s and type=%s and external_key=%s",
+                (team_id, rec.type, ext)).fetchone() is not None
             r = store.save_item(conn, actor, prov, team_id=team_id, type=rec.type, title=rec.title, body=rec.body,
-                                metadata=rec.metadata, external_key=f"{source}:{rec.key}")
+                                metadata=rec.metadata, external_key=ext, readers=None if exists else readers)
             out["saved"] += 1
             out["changed"] += bool(r["changed"])
             out["erased"] += bool(r.get("erased"))
-            out["items"].append({"key": rec.key, "item_id": r["item_id"], "version": r["version"],
-                                 "changed": r["changed"]})
+            entry = {"key": rec.key, "item_id": r["item_id"], "version": r["version"], "changed": r["changed"]}
+            if dropped:
+                entry["readers_dropped"] = dropped
             if not r.get("erased"):
                 _withdraw_deletions(conn, prov, source, r["item_id"])
+                if exists:
+                    access = _sync_readers(conn, actor, prov, source, r["item_id"], readers)
+                    if access is not None:
+                        entry["access_decision"] = access
+                        out["access_proposed"] += 1
+            out["items"].append(entry)
         for key in deleted:
             d = _propose_deletion(conn, actor, source, team_id, key)
             if d is not None:

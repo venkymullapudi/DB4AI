@@ -59,8 +59,11 @@ right priority, with a one-line reason.
 - [x] **Notices for `auto_notice` changes.** Send stale marks and merges that applied automatically to the same
       webhooks, with their revert deadline. Why: `auto_notice` promises "a human can revert within N days", but only
       pending decisions were ever announced, so nobody heard about the change in time to revert it.
-- [ ] **Readers on synced records.** Let a connector batch create items restricted to named readers (e.g. from a
+- [x] **Readers on synced records.** Let a connector batch create items restricted to named readers (e.g. from a
       Drive file's permissions). Why: v1 sync batches can't set readers, so private sources land team-wide.
+- [ ] **Drive permissions as readers.** In `gdrive`, map each file's permissions (users, not "anyone"/domain links)
+      to actor names and send them as `readers`. Needs an actor ↔ email mapping (actors only have a name today). Why:
+      split from "Readers on synced records"; the framework now accepts readers but no built-in connector sends them.
 - [ ] **Notion connector** on the connector framework (token from env, pages as documents, databases as datasets).
       Why: the next source named in SPEC §6.
 

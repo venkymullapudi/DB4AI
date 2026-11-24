@@ -69,6 +69,7 @@ class SyncItemIn(BaseModel):
     title: str
     body: str = ""
     metadata: dict = {}
+    readers: list[str] | None = None  # actor names who can read it in the source; None = the source says nothing
 
 
 class SyncDatasetIn(BaseModel):

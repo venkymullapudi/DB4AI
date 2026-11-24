@@ -679,3 +679,24 @@ each answer is the recommended one, resolved from the code.
 - **Q: Existing auto-applied decisions at upgrade?** Those still inside their window are named in the next message to
   each webhook (the listing cap keeps it short). They are still revertible, so hearing about them is useful.
 - **Not owner-level:** no data deleted, no migration, no new service or account.
+
+## 2026-11-25 — Readers on synced records
+Grilled one question at a time; each answer is the recommended one, resolved from the code.
+- **Q: Scope of this run?** The connector framework (`Record.readers`, `POST /sync/{source}` items' `readers`). Mapping
+  Drive permissions is split into its own roadmap item: actors have only a `name`, so Drive's emails need a mapping
+  first.
+- **Q: Names or ids?** Actor names, as on `POST /items`.
+- **Q: A reader who isn't a team member (unknown, or another team)?** Dropped and reported (`readers_dropped`); the item
+  is still restricted to the rest. Raising would fail a whole batch on one stray Drive collaborator, and dropping only
+  narrows access (fail closed). Widening to other teams is sharing, which stays an owner request.
+- **Q: Is the syncer a reader?** Yes, as `save_item` already does for creators: otherwise the next sync of the item is a
+  403 and the batch fails.
+- **Q: Readers on an item that already exists?** Changing access is always `ask_first` (SPEC §8), so a differing set
+  proposes `set_item_access` in the batch's transaction instead of applying it. The record's content is still saved.
+- **Q: Idempotence?** The payload carries `source_readers` and `acl_changes` (count of the item's `item_acl` change_log
+  rows): a re-sent batch has the same fingerprint (skipped), a rejected change isn't re-proposed, and after any ACL
+  change a new difference is a new decision. A newer set from the source, or one that matches the ACL again, withdraws
+  the pending one (`expired`), like `alter_dataset` supersession.
+- **Q: `readers` = None?** The source says nothing: never changes access, and never lifts a restriction. Lifting from
+  a sync would need an explicit "public" signal; not needed until a connector has one.
+- **Not owner-level:** no migration, no data deleted, no new service.
