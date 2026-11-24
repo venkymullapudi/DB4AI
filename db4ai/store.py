@@ -11,7 +11,7 @@ from uuid import UUID
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from .auth import Actor
+from .auth import AccessDenied, Actor
 from .config import settings
 from .db import Conn, Provenance, log_change, vector_enabled
 
@@ -30,6 +30,64 @@ def enqueue(conn: Conn, kind: str, payload: dict, dedupe_key: str | None = None,
         " on conflict (dedupe_key) where status = 'queued' do nothing",
         (kind, Jsonb(payload), dedupe_key, delay_seconds),
     )
+
+
+# ---------------------------------------------------------------- per-item ACLs (SPEC §8)
+
+def viewer(actor: Actor) -> UUID | None:
+    """The id to check item ACLs against in SQL (`db4ai_item_visible`), or None for admins (they see everything)."""
+    return None if actor.is_admin else actor.id
+
+
+VISIBLE = "(%(viewer)s::uuid is null or db4ai_item_visible({col}, %(viewer)s::uuid))"
+
+
+def item_visible(conn: Conn, actor: Actor, item_id: UUID) -> bool:
+    if actor.is_admin:
+        return True
+    return conn.execute("select db4ai_item_visible(%s, %s) as v", (item_id, actor.id)).fetchone()["v"]
+
+
+def require_item(conn: Conn, actor: Actor, item_id: UUID, *, write: bool = False) -> UUID:
+    """The item's team, after checking team access and the item's ACL.
+
+    An item the ACL hides from a team member is "not found", exactly like an unknown id (no existence oracle).
+    """
+    row = conn.execute("select team_id from items where id = %s", (item_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"item {item_id} not found")
+    (actor.require_write if write else actor.require_read)(row["team_id"])
+    if not item_visible(conn, actor, item_id):
+        raise KeyError(f"item {item_id} not found")
+    return row["team_id"]
+
+
+def item_readers(conn: Conn, item_id: UUID) -> list[UUID] | None:
+    """The item's restricted readers, or None if the whole team can read it."""
+    row = conn.execute("select readers from item_acl where item_id = %s", (item_id,)).fetchone()
+    return None if row is None else list(row["readers"])
+
+
+def set_readers(conn: Conn, prov: Provenance, item_id: UUID, readers: list[UUID] | None) -> None:
+    """Replace the item's ACL (None lifts it). Callers check authority; this validates and logs."""
+    before = item_readers(conn, item_id)
+    if readers is None:
+        conn.execute("delete from item_acl where item_id = %s", (item_id,))
+    else:
+        readers = sorted(set(readers), key=str)
+        known = conn.execute(
+            "select count(*) as n from team_members m join items i on i.team_id = m.team_id"
+            " where i.id = %s and m.actor_id = any(%s)", (item_id, readers)).fetchone()["n"]
+        if known != len(readers):
+            raise ValueError("readers must be members of the item's team")
+        conn.execute(
+            "insert into item_acl (item_id, readers, set_by, decision_id) values (%s, %s, %s, %s)"
+            " on conflict (item_id) do update set readers = excluded.readers, set_by = excluded.set_by,"
+            " decision_id = excluded.decision_id, set_at = now()",
+            (item_id, readers, prov.actor_id, prov.decision_id))
+    log_change(conn, prov, "item_acl", str(item_id), "set" if readers is not None else "lift",
+               before={"readers": [str(r) for r in before]} if before is not None else None,
+               after={"readers": [str(r) for r in readers]} if readers is not None else None)
 
 
 def _current(conn: Conn, item_id: UUID) -> dict | None:
@@ -68,10 +126,12 @@ def _summary(cur: dict) -> dict:
 
 def save_item(conn: Conn, actor: Actor, prov: Provenance, *, team_id: UUID, type: str, title: str,
               body: str = "", metadata: dict | None = None, external_key: str | None = None,
-              blob_sha256: str | None = None) -> dict:
+              blob_sha256: str | None = None, readers: list[UUID] | None = None) -> dict:
     """Create an item, or add a version if `external_key` already exists and content changed.
 
-    Idempotent: re-saving identical content adds no version.
+    Idempotent: re-saving identical content adds no version. `readers` restricts a new item to those actors
+    (plus its creator, the team's owners and admins) from its first version; changing an existing item's
+    readers goes through the harness (`set_item_access`).
     """
     actor.require_write(team_id)
     metadata = metadata or {}
@@ -97,6 +157,14 @@ def save_item(conn: Conn, actor: Actor, prov: Provenance, *, team_id: UUID, type
                                    (team_id, type, external_key)).fetchone()
         item_id = item_id["id"]
         log_change(conn, prov, "item", str(item_id), "create", after={"type": type, "team_id": str(team_id)})
+        if readers is not None:
+            set_readers(conn, prov, item_id, [*readers, actor.id])
+    elif not item_visible(conn, actor, item_id):
+        raise AccessDenied(f"item {item_id} is restricted; {actor.name} cannot write to it")
+    elif readers is not None:
+        have = item_readers(conn, item_id)
+        if have is None or set(have) != {*readers, actor.id}:
+            raise ValueError("readers only apply when creating an item; propose set_item_access to change them")
     base = _current(conn, item_id)
     if base is not None and base["status"] == "erased":
         return {"item_id": item_id, "version": base["version"], "changed": False, "erased": True}
@@ -138,25 +206,43 @@ def new_version(conn: Conn, prov: Provenance, item_id: UUID, *, title: str | Non
 
 
 def get_item(conn: Conn, actor: Actor, item_id: UUID) -> dict:
+    require_item(conn, actor, item_id)
     cur = _current(conn, item_id)
     if cur is None:
         raise KeyError(f"item {item_id} not found")
-    actor.require_read(cur["team_id"])
+    teams = None if actor.is_admin else list(actor.teams)
     cur["links"] = conn.execute(
         "select l.kind, l.confidence, l.reason, case when l.src_item = %(id)s then l.dst_item else l.src_item end as other,"
         " c.title as other_title, c.type as other_type"
         " from links l join items_current c on c.id = (case when l.src_item = %(id)s then l.dst_item else l.src_item end)"
-        " where l.src_item = %(id)s or l.dst_item = %(id)s order by l.confidence desc nulls last",
-        {"id": item_id},
+        " where (l.src_item = %(id)s or l.dst_item = %(id)s)"
+        " and (%(teams)s::uuid[] is null or c.team_id = any(%(teams)s::uuid[])) and " + VISIBLE.format(col="c.id") +
+        " order by l.confidence desc nulls last",
+        {"id": item_id, "teams": teams, "viewer": viewer(actor)},
     ).fetchall()
+    cur["readers"] = _reader_names(conn, item_id)
     return cur
 
 
+def _reader_names(conn: Conn, item_id: UUID) -> list[str] | None:
+    ids = item_readers(conn, item_id)
+    if ids is None:
+        return None
+    return [r["name"] for r in conn.execute("select name from actors where id = any(%s) order by name", (ids,))]
+
+
+def access(conn: Conn, actor: Actor, item_id: UUID) -> dict:
+    """Who can read the item: `readers` (None = the whole team) plus the team's owners and admins."""
+    team_id = require_item(conn, actor, item_id)
+    owners = [r["name"] for r in conn.execute(
+        "select a.name from team_members m join actors a on a.id = m.actor_id"
+        " where m.team_id = %s and m.role = 'owner' order by a.name", (team_id,))]
+    return {"item_id": item_id, "restricted": item_readers(conn, item_id) is not None,
+            "readers": _reader_names(conn, item_id), "owners": owners}
+
+
 def history(conn: Conn, actor: Actor, item_id: UUID) -> list[dict]:
-    team = conn.execute("select team_id from items where id = %s", (item_id,)).fetchone()
-    if team is None:
-        raise KeyError(f"item {item_id} not found")
-    actor.require_read(team["team_id"])
+    require_item(conn, actor, item_id)
     return conn.execute(
         "select v.version, v.title, v.status, v.source, v.reason, v.harness_decision_id, v.created_at,"
         " a.name as actor, a.kind as actor_kind"
@@ -167,10 +253,7 @@ def history(conn: Conn, actor: Actor, item_id: UUID) -> list[dict]:
 
 def revert(conn: Conn, actor: Actor, prov: Provenance, item_id: UUID, to_version: int) -> dict:
     """Revert = a new version copying an earlier one. Nothing is lost."""
-    team = conn.execute("select team_id from items where id = %s", (item_id,)).fetchone()
-    if team is None:
-        raise KeyError(f"item {item_id} not found")
-    actor.require_write(team["team_id"])
+    require_item(conn, actor, item_id, write=True)
     old = conn.execute("select * from item_versions where item_id=%s and version=%s", (item_id, to_version)).fetchone()
     if old is None:
         raise KeyError(f"item {item_id} has no version {to_version}")
@@ -304,7 +387,7 @@ def _nearest(conn: Conn, table: str, cols: str, finish: str, vec: list[float], m
 
 
 def similar_chunks(conn: Conn, vec: list[float], model: str, *, team_ids: list[UUID] | None,
-                   limit: int = 10, types: list[str] | None = None) -> list[dict]:
+                   viewer: UUID | None, limit: int = 10, types: list[str] | None = None) -> list[dict]:
     """Best-matching chunk per item, for chunks cut from the item's current content."""
     finish = (
         "select * from ("
@@ -315,13 +398,14 @@ def similar_chunks(conn: Conn, vec: list[float], model: str, *, team_ids: list[U
         " where c.status = 'active'"
         " and (%(teams)s::uuid[] is null or c.team_id = any(%(teams)s::uuid[]))"
         " and (%(types)s::text[] is null or c.type = any(%(types)s::text[]))"
+        " and " + VISIBLE.format(col="c.id") +
         " order by c.id, k.dist) best order by score desc limit %(limit)s"
     )
     return _nearest(conn, "item_chunks", "item_id, content_hash, chunk_no, start_char, end_char", finish,
-                    vec, model, {"teams": team_ids, "types": types}, limit)
+                    vec, model, {"teams": team_ids, "types": types, "viewer": viewer}, limit)
 
 
-def similar(conn: Conn, vec: list[float], model: str, *, team_ids: list[UUID] | None,
+def similar(conn: Conn, vec: list[float], model: str, *, team_ids: list[UUID] | None, viewer: UUID | None,
             exclude: UUID | None = None, limit: int = 10, types: list[str] | None = None) -> list[dict]:
     finish = (
         "select c.id, c.title, c.type, c.team_id, c.status, c.updated_at, 1 - e.dist as score"
@@ -330,10 +414,11 @@ def similar(conn: Conn, vec: list[float], model: str, *, team_ids: list[UUID] | 
         " and (%(teams)s::uuid[] is null or c.team_id = any(%(teams)s::uuid[]))"
         " and (%(exclude)s::uuid is null or c.id <> %(exclude)s::uuid)"
         " and (%(types)s::text[] is null or c.type = any(%(types)s::text[]))"
+        " and " + VISIBLE.format(col="c.id") +
         " order by e.dist limit %(limit)s"
     )
     return _nearest(conn, "item_embeddings", "item_id", finish, vec, model,
-                    {"teams": team_ids, "types": types, "exclude": exclude}, limit)
+                    {"teams": team_ids, "types": types, "exclude": exclude, "viewer": viewer}, limit)
 
 
 def search(conn: Conn, actor: Actor, query: str, *, embedder=None, limit: int = 10,
@@ -346,21 +431,24 @@ def search(conn: Conn, actor: Actor, query: str, *, embedder=None, limit: int = 
     teams = None if actor.is_admin else list(actor.teams)
     fts = conn.execute(
         "select c.id, c.version, c.title, c.type, c.team_id, c.status, c.updated_at,"
-        " ts_rank(to_tsvector('english', c.title || ' ' || c.body), plainto_tsquery('english', %s)) as score"
+        " ts_rank(to_tsvector('english', c.title || ' ' || c.body), plainto_tsquery('english', %(q)s)) as score"
         " from items_current c"
-        " where to_tsvector('english', c.title || ' ' || c.body) @@ plainto_tsquery('english', %s)"
-        " and (%s or c.status = 'active')"
-        " and (%s::uuid[] is null or c.team_id = any(%s::uuid[]))"
-        " and (%s::text[] is null or c.type = any(%s::text[]))"
-        " order by score desc limit %s",
-        (query, query, include_inactive, teams, teams, types, types, limit * 2),
+        " where to_tsvector('english', c.title || ' ' || c.body) @@ plainto_tsquery('english', %(q)s)"
+        " and (%(inactive)s or c.status = 'active')"
+        " and (%(teams)s::uuid[] is null or c.team_id = any(%(teams)s::uuid[]))"
+        " and (%(types)s::text[] is null or c.type = any(%(types)s::text[]))"
+        " and " + VISIBLE.format(col="c.id") +
+        " order by score desc limit %(limit)s",
+        {"q": query, "inactive": include_inactive, "teams": teams, "types": types, "limit": limit * 2,
+         "viewer": viewer(actor)},
     ).fetchall()
     results: dict[UUID, dict] = {}
     for r in fts:
         results[r["id"]] = {**r, "fts": float(r["score"]), "vec": 0.0, "chunk": None}
     if embedder is not None:
         vec = embedder.embed([query])[0]
-        for r in similar_chunks(conn, vec, embedder.name, team_ids=teams, limit=limit * 2, types=types):
+        for r in similar_chunks(conn, vec, embedder.name, team_ids=teams, viewer=viewer(actor),
+                                limit=limit * 2, types=types):
             chunk = {"no": r.pop("chunk_no"), "start": r.pop("start_char"), "end": r.pop("end_char"),
                      "text": r.pop("chunk_text")}
             entry = results.setdefault(r["id"], {**r, "fts": 0.0, "vec": 0.0})
@@ -386,7 +474,7 @@ def _version_as_of(conn: Conn, item_id: UUID, as_of: datetime) -> dict | None:
     ).fetchone()
 
 
-def _links_as_of(conn: Conn, item_id: UUID, as_of: datetime) -> list[dict]:
+def _links_as_of(conn: Conn, actor: Actor, item_id: UUID, as_of: datetime) -> list[dict]:
     """Links of the item that existed at `as_of`, rebuilt from the append-only change_log (links can be deleted)."""
     rows = conn.execute(
         "select ins.after->>'kind' as kind, (ins.after->>'confidence')::real as confidence,"
@@ -402,7 +490,7 @@ def _links_as_of(conn: Conn, item_id: UUID, as_of: datetime) -> list[dict]:
     out = []
     for r in rows:
         other = _version_as_of(conn, UUID(r["other"]), as_of)
-        if other is not None:
+        if other is not None and actor.can_read(other["team_id"]) and item_visible(conn, actor, other["id"]):
             out.append({"kind": r["kind"], "confidence": r["confidence"], "other": other["id"],
                         "other_title": other["title"], "other_type": other["type"]})
     return out
@@ -414,16 +502,13 @@ def get_item_as_of(conn: Conn, actor: Actor, item_id: UUID, as_of: datetime) -> 
     Unknown items and items created after `as_of` are both "not found". An erased item's old versions were
     scrubbed, so they read back as the tombstone text; `current_status` says so.
     """
-    team = conn.execute("select team_id from items where id = %s", (item_id,)).fetchone()
-    if team is None:
-        raise KeyError(f"item {item_id} not found")
-    actor.require_read(team["team_id"])
+    require_item(conn, actor, item_id)
     row = _version_as_of(conn, item_id, as_of)
     if row is None:
         raise KeyError(f"item {item_id} did not exist at {as_of.isoformat()}")
     cur = _current(conn, item_id)
     row["as_of"], row["current_version"], row["current_status"] = as_of, cur["version"], cur["status"]
-    row["links"] = _links_as_of(conn, item_id, as_of)
+    row["links"] = _links_as_of(conn, actor, item_id, as_of)
     return row
 
 
@@ -445,8 +530,10 @@ def search_as_of(conn: Conn, actor: Actor, query: str, as_of: datetime, *, limit
         " and c.status <> 'erased' and (%(inactive)s or v.status = 'active')"
         " and (%(teams)s::uuid[] is null or i.team_id = any(%(teams)s::uuid[]))"
         " and (%(types)s::text[] is null or i.type = any(%(types)s::text[]))"
+        " and " + VISIBLE.format(col="i.id") +
         " order by score desc, i.id limit %(limit)s",
-        {"t": as_of, "q": query, "inactive": include_inactive, "teams": teams, "types": types, "limit": limit},
+        {"t": as_of, "q": query, "inactive": include_inactive, "teams": teams, "types": types, "limit": limit,
+         "viewer": viewer(actor)},
     ).fetchall()
     for r in rows:
         r["score"] = round(min(float(r["score"]), 1.0) * 0.5, 4)

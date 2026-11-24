@@ -53,11 +53,13 @@ def save_meeting(title: str, notes: str, attendees: list[str] | None = None, dat
 
 @mcp.tool()
 def save_document(title: str, body: str, team: str | None = None, metadata: dict | None = None,
-                  key: str | None = None) -> dict[str, Any]:
-    """Save a document. Pass a stable `key` (e.g. its URL or path) so later saves add versions instead of copies."""
+                  key: str | None = None, readers: list[str] | None = None) -> dict[str, Any]:
+    """Save a document. Pass a stable `key` (e.g. its URL or path) so later saves add versions instead of copies.
+    Pass `readers` (actor names) when creating a sensitive document to restrict it to them, you, the team's
+    owners and admins; changing an existing item's readers needs a human-approved request (HTTP)."""
     c, a = _ctx()
     return service.save(c, a, type="document", title=title, body=body, team=team, metadata=metadata,
-                        external_key=key, source=SOURCE)
+                        external_key=key, source=SOURCE, readers=readers)
 
 
 @mcp.tool()

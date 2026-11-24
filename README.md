@@ -22,6 +22,11 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   (`GET /items/{id}/erasures`) records what kind of erasure it was, who asked, who approved and why.
   Copies go too: `data.*` rows keyed by the item (and their change log) are scrubbed in the same transaction, and
   each other item that quotes the erased text or holds it as a merge alias gets its own `redact_item` proposal.
+- **Per-item access.** Within a team, an item can be restricted to named readers: pass `readers` (actor names) to
+  `POST /items` or MCP `save_document` when creating it, or ask to change it with `POST /items/{id}/access`
+  (`{"readers": [...] | null, "reason": ...}`; always reviewed by a team owner or admin). Owners and admins always
+  read; everyone else in the team gets "not found" from reads, search, `ask`, links and harness listings.
+  `GET /items/{id}/access` shows who can read it.
 - **Self-maintenance.** Background maintainers enrich items (summary, tags, entities, embeddings), link related
   items, merge near-duplicates, mark memories stale when newer items contradict them, propose turning
   recurring metadata into real tables, and clean up after themselves.

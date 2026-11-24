@@ -32,6 +32,12 @@ class ItemIn(BaseModel):
     external_key: str | None = None
     source: str = "http"
     reason: str | None = None
+    readers: list[str] | None = None  # actor names: restrict a new item to them (plus creator, owners, admins)
+
+
+class AccessIn(BaseModel):
+    readers: list[str] | None  # None lifts the restriction; [] leaves only the team's owners and admins
+    reason: str
 
 
 class EraseIn(BaseModel):
@@ -151,6 +157,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.post("/items/{item_id}/revert/{version}")
     def post_revert(item_id: str, version: int, a: Actor = Depends(actor), c: Conn = Depends(conn)):
         return service.revert(c, a, item_id, version, source="http")
+
+    @app.get("/items/{item_id}/access")
+    def get_access(item_id: str, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.item_access(c, a, item_id)
+
+    @app.post("/items/{item_id}/access")
+    def post_access(item_id: str, body: AccessIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.propose_access(c, a, item_id, body.readers, body.reason, source="http")
 
     @app.post("/items/{item_id}/erase")
     def post_erase(item_id: str, body: EraseIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):

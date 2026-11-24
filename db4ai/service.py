@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from . import ask as ask_mod
 from . import connectors, datasets, erasure, harness, store
@@ -27,13 +27,44 @@ def resolve_team(conn: Conn, actor: Actor, team: str | None) -> UUID:
 
 def save(conn: Conn, actor: Actor, *, type: str, title: str, body: str = "", team: str | None = None,
          metadata: dict | None = None, external_key: str | None = None, source: str = "api",
-         reason: str | None = None) -> dict:
+         reason: str | None = None, readers: list[str] | None = None) -> dict:
+    """`readers` (actor names) restricts a new item to them, its creator, the team's owners and admins."""
     tid = resolve_team(conn, actor, team)
     prov = Provenance(actor.id, source, reason)
     with transaction(conn, prov):
         r = store.save_item(conn, actor, prov, team_id=tid, type=type, title=title, body=body,
-                            metadata=metadata, external_key=external_key)
+                            metadata=metadata, external_key=external_key,
+                            readers=None if readers is None else actor_ids(conn, readers))
     return jsonable(r)
+
+
+def actor_ids(conn: Conn, names: list[str]) -> list[UUID]:
+    rows = conn.execute("select id, name from actors where name = any(%s)", (list(names),)).fetchall()
+    unknown = sorted(set(names) - {r["name"] for r in rows})
+    if unknown:
+        raise ValueError(f"unknown actors: {', '.join(unknown)}")
+    return [r["id"] for r in rows]
+
+
+def item_access(conn: Conn, actor: Actor, item_id: str) -> dict:
+    return jsonable(store.access(conn, actor, UUID(item_id)))
+
+
+def propose_access(conn: Conn, actor: Actor, item_id: str, readers: list[str] | None, reason: str,
+                   source: str = "api") -> dict:
+    """Queue `set_item_access` (always ask_first): restrict the item to `readers`, or lift it with None."""
+    iid = UUID(item_id)
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("a reason is required to change who can read an item")
+    with transaction(conn):
+        store.require_item(conn, actor, iid)
+        # `request` makes each human request its own decision: the harness never re-proposes a fingerprint it
+        # has seen, and restricting, lifting, then restricting again is legitimate.
+        payload: dict[str, Any] = {"item_id": str(iid), "readers": None, "request": str(uuid4())}
+        if readers is not None:  # [] = only the team's owners and admins
+            payload["readers"] = sorted(str(i) for i in actor_ids(conn, readers))
+        return jsonable(harness.propose(conn, actor, "set_item_access", payload, reason=reason, source=source))
 
 
 def sync_cursor(conn: Conn, actor: Actor, source: str, team: str | None = None) -> dict:

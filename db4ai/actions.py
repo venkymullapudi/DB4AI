@@ -142,6 +142,9 @@ def _merge_apply(conn, prov, p):
     keep, drop = _cur(conn, p["keep"]), _cur(conn, p["drop"])
     if keep["team_id"] != drop["team_id"]:
         raise ValueError("cross-team merges are not allowed; propose resolve_contradiction instead")
+    rk, rd = store.item_readers(conn, p["keep"]), store.item_readers(conn, p["drop"])
+    if (set(rk) if rk is not None else None) != (set(rd) if rd is not None else None):
+        raise ValueError("items with different readers can't be merged (the alias would carry the title across)")
     aliases = sorted(set(keep["metadata"].get("aliases", [])) | {drop["title"]})
     store.new_version(conn, prov, p["keep"], metadata_patch={"aliases": aliases})
     store.new_version(conn, prov, p["drop"], status="merged", merged_into=UUID(p["keep"]))
@@ -164,7 +167,9 @@ def _promote_apply(conn, prov, p):
     cols = [{"name": "item_id", "type": "uuid"}] + p["fields"]
     ds = datasets.create_dataset(conn, agent, prov, team_id, p["dataset_name"], cols)
     rows = []
-    for it in conn.execute("select id, metadata from items_current where team_id=%s and type=%s and status='active'",
+    # Restricted items stay out: data.* tables are readable by the whole team.
+    for it in conn.execute("select id, metadata from items_current c where team_id=%s and type=%s and status='active'"
+                           " and not exists (select 1 from item_acl a where a.item_id = c.id)",
                            (team_id, p["item_type"])):
         r = {"item_id": it["id"]}
         for f in p["fields"]:
@@ -230,6 +235,34 @@ def _access_apply(conn, prov, p):
     return {}
 
 
+# ---------------------------------------------------------------- per-item ACLs
+
+def _names(conn: Conn, ids) -> list[str] | None:
+    if ids is None:
+        return None
+    return [r["name"] for r in conn.execute("select name from actors where id = any(%s::uuid[]) order by name",
+                                            ([str(i) for i in ids],))]
+
+
+def _item_access_diff(conn, p):
+    cur = _cur(conn, p["item_id"])
+    return {"item": p["item_id"], "title": cur["title"],
+            "readers": [_names(conn, store.item_readers(conn, p["item_id"])), _names(conn, p.get("readers"))]}
+
+
+def _item_access_apply(conn, prov, p):
+    _cur(conn, p["item_id"])
+    before = store.item_readers(conn, p["item_id"])
+    readers = p.get("readers")
+    store.set_readers(conn, prov, UUID(p["item_id"]), None if readers is None else [UUID(r) for r in readers])
+    return {"item_id": p["item_id"], "before": None if before is None else [str(r) for r in before]}
+
+
+def _item_access_revert(conn, prov, result):
+    before = result.get("before")
+    store.set_readers(conn, prov, UUID(result["item_id"]), None if before is None else [UUID(r) for r in before])
+
+
 REGISTRY: dict[str, Action] = {
     "enrich": Action(_team_of_item("item_id"), _enrich_diff, _enrich_apply, _revert_versions),
     "add_tags": _meta_action("tags"),
@@ -243,6 +276,8 @@ REGISTRY: dict[str, Action] = {
     "promote_schema": Action(lambda c, p: UUID(p["team_id"]), _promote_diff, _promote_apply, None),
     "alter_dataset": Action(_team_of_dataset, _alter_diff, _alter_apply, None),  # never drops a column
     "archive_dataset": Action(_team_of_dataset, _archive_ds_diff, _archive_ds_apply, _archive_ds_revert),
+    # Always ask_first (see harness.ALWAYS_ASK): it decides who can read an item.
+    "set_item_access": Action(_team_of_item("item_id"), _item_access_diff, _item_access_apply, _item_access_revert),
     "change_access": Action(lambda c, p: UUID(p["team_id"]), lambda c, p: dict(p), _access_apply, None),
     # Redaction/erasure: always ask_first, admin-only (see harness.ADMIN_ONLY), never revertible.
     "erase_item": Action(_team_of_item("item_id"), erasure._erase_diff, erasure._erase_apply, None),

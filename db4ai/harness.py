@@ -26,6 +26,8 @@ class HarnessError(Exception):
 
 # Always ask_first whatever the policies table says, and only admins may decide them.
 ADMIN_ONLY = frozenset({"erase_item", "redact_item"})
+# Always ask_first whatever the policies table says (team owners and admins decide).
+ALWAYS_ASK = ADMIN_ONLY | {"set_item_access"}
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,7 @@ def resolve_tier(conn: Conn, action_type: str, team_id: UUID | None, confidence:
     ).fetchone()
     if row is None:
         return Tier("ask_first", 0, 14)  # fail closed
-    if action_type in ADMIN_ONLY:
+    if action_type in ALWAYS_ASK:
         return Tier("ask_first", 0, row["expires_after_days"])
     tier = row["tier"]
     if tier != "ask_first" and row["min_confidence"] is not None and (confidence is None or confidence < row["min_confidence"]):
@@ -179,6 +181,9 @@ def revert(conn: Conn, actor: Actor, decision_id: UUID, note: str | None = None)
             raise HarnessError(f"decision is {d['status']}; nothing to revert")
         if actor.kind == "agent" or not (actor.is_admin or actor.can_read(d["team_id"])):
             raise AccessDenied("not allowed to revert this decision")
+        if not actor.is_admin and not conn.execute("select db4ai_decision_visible(%s, %s) as v",
+                                                   (Jsonb(d["payload"]), actor.id)).fetchone()["v"]:
+            raise AccessDenied("not allowed to revert this decision")
         in_window = d["revert_until"] is not None and conn.execute(
             "select %s::timestamptz > now() as x", (d["revert_until"],)).fetchone()["x"]
         if not (in_window or actor.is_admin):
@@ -211,11 +216,13 @@ def expire_pending(conn: Conn) -> int:
 
 def list_decisions(conn: Conn, actor: Actor, status: str = "pending", limit: int = 50) -> list[dict]:
     teams = None if actor.is_admin else list(actor.teams)
+    viewer = None if actor.is_admin else actor.id
     return conn.execute(
         "select d.id, d.action_type, d.tier, d.status, d.confidence, d.reason, d.diff, d.evidence, d.payload,"
         " d.proposed_at, d.expires_at, d.revert_until, t.name as team, a.name as proposed_by"
         " from harness_decisions d left join teams t on t.id = d.team_id join actors a on a.id = d.proposed_by"
         " where d.status = %s and (%s::uuid[] is null or d.team_id = any(%s::uuid[]))"
+        " and (%s::uuid is null or db4ai_decision_visible(d.payload, %s::uuid))"  # per-item ACLs
         " order by d.proposed_at desc limit %s",
-        (status, teams, teams, limit),
+        (status, teams, teams, viewer, viewer, limit),
     ).fetchall()

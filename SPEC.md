@@ -78,7 +78,7 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
 |---|---|---|
 | `auto` | apply now, logged | `enrich`, `add_tags`, `add_link`, `set_summary`, `set_entities` |
 | `auto_notice` | apply now; a human can revert within N days | `mark_stale`, `merge_items` (confidence ≥ threshold) |
-| `ask_first` | queued in the harness; nothing happens until approved | `archive_item`, `promote_schema`, `alter_dataset`, `archive_dataset`, `merge_items` (low confidence), `resolve_contradiction`, `change_access`, `erase_item` and `redact_item` (always; admin-only), **any unknown action** |
+| `ask_first` | queued in the harness; nothing happens until approved | `archive_item`, `promote_schema`, `alter_dataset`, `archive_dataset`, `merge_items` (low confidence), `resolve_contradiction`, `change_access`, `set_item_access` (always), `erase_item` and `redact_item` (always; admin-only), **any unknown action** |
 
 Tiers come from the `policies` table (per team, with a global default). The AI never picks a tier.
 
@@ -203,3 +203,14 @@ enrichment and proposals with a heuristic fallback when no API key is set, plugg
 - Teams; actors are `human` or `agent`. Roles: `admin`, `owner`, `member` (per team), `agent`.
 - Every item belongs to one team; reads and writes are limited to the actor's teams (admins see all).
 - API tokens (stored hashed). Harness decisions are routed to owners of the scope team; admins can decide anything.
+- **Per-item ACLs** (`item_acl`): an item may be restricted to a list of readers, who must be members of its team.
+  It is then readable only by them, the team's owners and admins (access narrows, never widens). No row = the whole
+  team. A new item can be created restricted (`readers` on `POST /items`; the creator is always added); after that,
+  changing or lifting it is a `set_item_access` decision (always `ask_first`, revertible, each request its own
+  decision). Every read path applies it through `db4ai_item_visible(item, actor)`: get/history/as-of reads (a hidden
+  item is 404, like an unknown id), search, as-of search, `ask` and its carried history, links (a hidden other end is
+  dropped), and harness listings and reverts (a decision is hidden if any item its payload names is). Writing to a
+  restricted item (upsert by key, revert, erasure or access requests) needs read access. Maintainers still enrich and
+  embed restricted items, but never link, merge or mark them stale against other items, and schema promotion leaves
+  them out of `data.*` tables (readable by the whole team); a merge of items with different readers is refused.
+  As-of reads use today's ACL.

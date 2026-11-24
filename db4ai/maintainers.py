@@ -76,13 +76,16 @@ def relate(ctx: Context, payload: dict) -> Commit | None:
     cur = ctx.conn.execute("select * from items_current where id=%s", (item_id,)).fetchone()
     if cur is None or cur["status"] != "active":
         return None
+    if store.item_readers(ctx.conn, item_id) is not None:
+        return None  # restricted: links, merges and staleness would carry its id or content to other items
     emb = ctx.conn.execute("select embedding::text as e from item_embeddings where item_id=%s and model=%s",
                            (item_id, ctx.embedder.name)).fetchone()
     if emb is None:
         return None
     vec = [float(x) for x in emb["e"].strip("[]{}").split(",")]
     s = ctx.settings
-    neighbours = store.similar(ctx.conn, vec, ctx.embedder.name, team_ids=[cur["team_id"]], exclude=item_id, limit=8)
+    neighbours = store.similar(ctx.conn, vec, ctx.embedder.name, team_ids=[cur["team_id"]],
+                               viewer=ctx.agent.id, exclude=item_id, limit=8)
 
     proposals: list[tuple[str, dict, str, float, list]] = []
     for n in neighbours:
@@ -138,7 +141,8 @@ def _infer_type(values: list) -> str | None:
 def schema_scan(ctx: Context, payload: dict) -> Commit | None:
     s = ctx.settings
     groups = ctx.conn.execute(
-        "select team_id, type, count(*) n from items_current where status='active' group by 1,2 having count(*) >= %s",
+        "select team_id, type, count(*) n from items_current c where status='active'"
+        " and not exists (select 1 from item_acl a where a.item_id = c.id) group by 1,2 having count(*) >= %s",
         (s.schema_min_items,)).fetchall()
     proposals = []
     for g in groups:
@@ -147,7 +151,8 @@ def schema_scan(ctx: Context, payload: dict) -> Commit | None:
             continue
         counts: Counter = Counter()
         values: dict[str, list] = defaultdict(list)
-        for r in ctx.conn.execute("select metadata from items_current where team_id=%s and type=%s and status='active'",
+        for r in ctx.conn.execute("select metadata from items_current c where team_id=%s and type=%s and status='active'"
+                                  " and not exists (select 1 from item_acl a where a.item_id = c.id)",
                                   (g["team_id"], g["type"])):
             for k, v in r["metadata"].items():
                 if k not in _RESERVED_META and not k.startswith("_"):

@@ -552,3 +552,35 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
 - **Q: Result shape?** Unchanged, plus `as_of` echoed when given. Bad timestamps are a 400 via `parse_as_of`.
 - **Surfaces:** `POST /ask` body `as_of`, MCP `ask(as_of=...)`, `service.ask`. No CLI `ask` exists, so none added.
 - **Not owner-level:** read-only, one additive migration (`014_ask_as_of.sql`), no new service.
+
+## 2026-11-24 — Per-item ACLs beyond team scope
+Grilled one question at a time; each answer is the recommended one, resolved from the code.
+- **Q: Narrow, widen, or both?** Narrow first: an item can be restricted to named readers inside its team. Narrowing
+  fails closed (a bug hides too much, never too little) and needs no cross-team rules. Sharing with other teams is
+  split into its own roadmap item.
+- **Q: Who always reads a restricted item?** Its listed readers, the team's owners and admins. Owners decide the
+  team's harness decisions, whose diffs show item content, so hiding items from them would either leak via diffs or
+  block their decisions. Readers must be team members (a 400 otherwise): the ACL is an intersection with team scope.
+- **Q: Where is it stored?** `item_acl (item_id, readers uuid[], set_by, decision_id, set_at)`, current state like
+  `team_members`, with every change in `change_log` (entity `item_acl`, ids only). ACLs hold no content, so erasure
+  has nothing to scrub. Not versioned with the item: access is not content, and a content revert must not change it.
+- **Q: How is it enforced?** One SQL function `db4ai_item_visible(item, actor)` used by every read query (search,
+  vector search, as-of search, `ask` carried items, links, harness listings via `db4ai_decision_visible(payload)`), and
+  `store.require_item` for single-item reads and writes. A hidden item is "not found" (404), like an unknown id, so
+  ids can't be probed; outsiders to the team still get 403 as before.
+- **Q: How does access change?** A new item can be created restricted (`readers` on `POST /items`, MCP
+  `save_document`; the creator is always added), so a sensitive item is never visible to the whole team first. Changes
+  afterwards are a `set_item_access` decision: always `ask_first` (hard-coded like erasure, since lifting widens access),
+  decided by owners/admins, revertible. Each request carries a request id, so restrict → lift → restrict again isn't
+  swallowed by the harness's "never re-propose a fingerprint" rule. `readers: []` leaves only owners and admins.
+  Passing `readers` for an existing item is a 400 (use the request).
+- **Q: Maintainers?** The maintainer agent is not a reader. Enrichment and embeddings still run (they stay on the item
+  and its readers' search), but `relate` skips restricted items and never picks one as a neighbour, so no link, merge,
+  alias or staleness explanation carries their id or text to another item. Schema promotion skips them (`data.*`
+  tables are team-wide). `merge_items` refuses items with different readers.
+- **Q: Writes?** Need read access: an upsert by key, revert, erasure or access request on a hidden item fails. A
+  connector whose actor isn't a reader can't update a restricted item; add it as a reader. Sync batches don't set
+  readers in v1.
+- **Q: As-of reads?** Today's ACL, like today's team scope.
+- **Q: Notifications?** Unchanged: messages carry ids, action types and counts, no content.
+- **Not owner-level:** no data deleted, additive migration (`015_item_acl.sql`), no new service.

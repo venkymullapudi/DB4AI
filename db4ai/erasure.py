@@ -24,7 +24,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from . import store
-from .auth import AccessDenied, Actor
+from .auth import Actor
 from .db import Conn, Provenance, log_change
 
 ACTIONS = ("erase_item", "redact_item")
@@ -57,11 +57,7 @@ def request(conn: Conn, actor: Actor, item_id: UUID, *, reason: str, terms: list
     """
     from . import harness  # harness imports actions, which imports this module
 
-    team = conn.execute("select team_id from items where id = %s", (item_id,)).fetchone()
-    if team is None:
-        raise KeyError(f"item {item_id} not found")
-    if not actor.can_read(team["team_id"]):
-        raise AccessDenied(f"{actor.name} cannot access item {item_id}")
+    store.require_item(conn, actor, item_id)
     reason = (reason or "").strip()
     if not reason:
         raise ValueError("a reason is required for erasure and redaction requests")
@@ -458,10 +454,7 @@ def _redact_apply(conn: Conn, prov: Provenance, p: dict) -> dict:
 
 
 def erasures(conn: Conn, actor: Actor, item_id: UUID) -> list[dict]:
-    team = conn.execute("select team_id from items where id = %s", (item_id,)).fetchone()
-    if team is None:
-        raise KeyError(f"item {item_id} not found")
-    actor.require_read(team["team_id"])
+    store.require_item(conn, actor, item_id)
     return conn.execute(
         "select e.id, e.kind, e.reason, e.versions, e.terms, e.matches, e.blobs_deleted, e.blobs_kept,"
         " e.data_rows, e.copies, e.decision_id, e.created_at, r.name as requested_by, a.name as approved_by"

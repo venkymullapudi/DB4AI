@@ -58,5 +58,7 @@ right priority, with a one-line reason.
 
 ## Later
 
-- [ ] Per-item ACLs beyond team scope.
+- [x] Per-item ACLs beyond team scope. (v1 narrows within a team: named readers + owners + admins.)
+- [ ] **Sharing an item with another team.** Grant read access to actors or teams outside the item's team. Why: split
+      from per-item ACLs; v1 only narrows access, it never widens it.
 - [ ] Evaluation set for the maintainers (dedup, staleness precision) for use with the real Claude path.

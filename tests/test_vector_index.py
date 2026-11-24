@@ -24,8 +24,8 @@ def test_model_dims_are_fixed_on_first_use(world):
         with transaction(w.conn):
             store.put_chunks(w.conn, i, "m1", 1, "h", [(0, 5)], [[1.0, 0.0]])
     with pytest.raises(ValueError, match="query has 2"):
-        store.similar(w.conn, [1.0, 0.0], "m1", team_ids=None)
-    assert store.similar(w.conn, [1.0, 0.0], "unknown-model", team_ids=None) == []
+        store.similar(w.conn, [1.0, 0.0], "m1", team_ids=None, viewer=None)
+    assert store.similar(w.conn, [1.0, 0.0], "unknown-model", team_ids=None, viewer=None) == []
 
 
 def test_enrichment_registers_model_and_builds_indexes(world):
@@ -75,7 +75,7 @@ def test_small_candidate_pool_falls_back_to_exact_results(world, monkeypatch):
     assert {h["id"] for h in small} == {h["id"] for h in exact} == set(ours)
     assert [h["score"] for h in small] == [h["score"] for h in exact]
     vec = emb.embed([q])[0]
-    assert [r["id"] for r in store.similar(w.conn, vec, emb.name, team_ids=[w.eng], limit=3)] == \
+    assert [r["id"] for r in store.similar(w.conn, vec, emb.name, team_ids=[w.eng], viewer=None, limit=3)] == \
         [h["id"] for h in exact]
 
 
