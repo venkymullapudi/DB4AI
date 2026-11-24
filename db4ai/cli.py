@@ -61,6 +61,12 @@ def main(argv: list[str] | None = None) -> None:
     u.add_argument("--team", action="append", default=[], help="team[:role], role=owner|member (repeatable)")
     u.add_argument("--admin", action="store_true")
     u.add_argument("--agent", action="store_true")
+    u.add_argument("--email", help="the user's email, so connectors can map a source's users (e.g. Drive sharing)")
+
+    em = sub.add_parser("email", help="map an existing actor to an email address (no new token)")
+    em.add_argument("name")
+    em.add_argument("address", nargs="?", help="omit with --clear to remove the mapping")
+    em.add_argument("--clear", action="store_true")
 
     i = sub.add_parser("import", help="import a file or folder")
     i.add_argument("path", type=Path)
@@ -79,6 +85,9 @@ def main(argv: list[str] | None = None) -> None:
     sy.add_argument("--folder", action="append", dest="folders",
                     help="gdrive: sync only this folder or shared drive id and everything below it (repeatable; "
                          "default DB4AI_GDRIVE_FOLDERS, else all the token can read)")
+    sy.add_argument("--readers", action="store_true", default=None,
+                    help="gdrive: restrict each synced file to the team members it is shared with, matched by "
+                         "email (default DB4AI_GDRIVE_READERS)")
 
     nr = sub.add_parser("notify-route", help="route a team's pending harness decisions to a webhook held in an env var")
     nr.add_argument("op", choices=["add", "remove", "list"])
@@ -120,12 +129,30 @@ def main(argv: list[str] | None = None) -> None:
             _out({"team_id": auth.create_team(conn, a.name)})
     elif a.cmd == "user":
         with conn.transaction():
-            uid = auth.create_actor(conn, a.name, "agent" if a.agent else "human", a.admin)
+            try:
+                uid = auth.create_actor(conn, a.name, "agent" if a.agent else "human", a.admin, a.email)
+            except ValueError as e:
+                sys.exit(str(e))
             for spec in a.team:
                 name, _, role = spec.partition(":")
                 auth.add_member(conn, auth.create_team(conn, name), uid, role or "member")
             token = auth.issue_token(conn, uid)
         _out({"actor_id": uid, "token": token, "note": "store this token now; it is not shown again"})
+    elif a.cmd == "email":
+        if a.clear == bool(a.address):
+            sys.exit("give an address, or --clear")
+        try:
+            with conn.transaction():
+                auth.set_email(conn, a.name, a.address)
+        except KeyError:
+            sys.exit(f"no actor named {a.name!r}")
+        except ValueError as e:
+            sys.exit(str(e))
+        except Exception as e:  # unique violation: another actor has it
+            if getattr(e, "sqlstate", None) == "23505":
+                sys.exit(f"{a.address} is already mapped to another actor")
+            raise
+        _out({"actor": a.name, "email": None if a.clear else auth.normalize_email(a.address)})
     elif a.cmd == "import":
         from . import ingest
 
@@ -150,7 +177,8 @@ def main(argv: list[str] | None = None) -> None:
         if a.connector == "gdrive":
             from .gdrive import DriveError, GoogleDrive
             try:
-                _out(connectors.run(conn, actor, a.source or a.connector, team_id, GoogleDrive(folders=a.folders)))
+                _out(connectors.run(conn, actor, a.source or a.connector, team_id,
+                                    GoogleDrive(folders=a.folders, readers=a.readers)))
             except DriveError as e:
                 sys.exit(str(e))
             return

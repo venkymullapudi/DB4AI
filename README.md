@@ -55,11 +55,15 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   An item can carry `readers` (actor names who can read it in the source): a new item is created restricted to them
   (plus the syncer); names outside the team are dropped. When the source's readers change later, the sync proposes
   `set_item_access` for an owner to approve.
+  Sources that only know emails send `reader_emails`, matched to actors' emails (`db4ai user NAME --email ...` or
+  `db4ai email NAME ADDRESS`).
   `db4ai sync gdrive --team eng` syncs Google Docs (exported as text), text/Markdown files, and PDFs and .docx files (text extracted) from Google Drive
   (including shared drives), and each Google Sheets tab as a dataset table `data.<team>_<name>` (diffed on every change;
   column changes and removed tabs wait for approval in the harness), through the Drive changes API, with an OAuth token you supply in the environment.
   `--folder <id>` (repeatable, or `DB4AI_GDRIVE_FOLDERS`) limits it to those folders or shared drives and everything
   below them; files that leave the scope count as deleted.
+  `--readers` (or `DB4AI_GDRIVE_READERS=1`) restricts each synced file to the team members it is shared with in Drive
+  (by email; files shared with anyone or your whole domain stay team-wide, groups are not expanded).
   A file deleted (or trashed) in the source proposes archiving its item in the harness; nothing is archived until a
   team owner approves, and the proposal is withdrawn if the file comes back first.
   A batch can also carry `datasets` (`key`, `name`, `columns`, `rows`: a full snapshot of one table, e.g. a sheet tab)
@@ -150,6 +154,7 @@ db4ai eval --llm claude --min-precision 0.9
 | `DB4AI_WEBHOOK_<NAME>` | — | a team's own Slack/Teams webhook (same format as `DB4AI_NOTIFY_WEBHOOKS`); route a team to it with `db4ai notify-route add <team> DB4AI_WEBHOOK_<NAME> --as <admin or owner>` or `PUT /teams/{team}/notify-routes/DB4AI_WEBHOOK_<NAME>`; erasure/redaction requests only go to the global webhooks |
 | `DB4AI_NOTIFY_DELAY_SECONDS` | `60` | wait before sending, so a burst of proposals becomes one message |
 | `DB4AI_GDRIVE_TOKEN` | — | Google Drive OAuth access token (scope `drive.readonly`) for `db4ai sync gdrive` |
+| `DB4AI_GDRIVE_READERS` | off | `1` = restrict synced Drive files to the team members they are shared with (matched by actor email) |
 | `DB4AI_GDRIVE_FOLDERS` | — | comma-separated Drive folder / shared drive ids to limit `db4ai sync gdrive` to (default: everything the token can read) |
 | `DB4AI_GDRIVE_REFRESH_TOKEN`, `DB4AI_GDRIVE_CLIENT_ID`, `DB4AI_GDRIVE_CLIENT_SECRET` | — | instead of (or with) the access token: refresh it when it expires |
 | `DB4AI_PUBLIC_URL` | — | base URL of the web UI, used for the review link in notifications |

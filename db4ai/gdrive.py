@@ -21,6 +21,11 @@ archiving its item through the harness.
 Google Sheets are synced as datasets, not items: each grid tab is read through the Sheets API (formatted values, first
 row = header) and sent as a `DatasetRecord` keyed `<file id>#<sheet id>`, in its own batch at the cursor the page
 started from. Tabs that disappear, and every tab of a removed spreadsheet, are reported in `deleted_datasets`.
+
+With readers on (`readers=True` or `DB4AI_GDRIVE_READERS=1`), each file's `user` permissions are sent as the record's
+`reader_emails` (matched to `actors.email` by the framework). A file shared with `anyone` or a whole `domain` sends
+None (the team can read it); `group` permissions are ignored (DB4AI can't expand groups), which only narrows. Files
+whose permissions Drive won't list send None, so access stays as it is. The cursor carries `acl:` while this is on.
 """
 
 from __future__ import annotations
@@ -57,6 +62,8 @@ SYNCED_TYPES = {GDOC, SHEET, *TEXT_TYPES, *BINARY_TYPES}
 TYPES_TAG = "types:" + hashlib.sha256(",".join(sorted(SYNCED_TYPES)).encode()).hexdigest()[:8] + ":"
 MAX_BYTES = 10 * 1024 * 1024  # Drive's own export limit; larger text files are skipped
 FILE_FIELDS = "id,name,mimeType,modifiedTime,webViewLink,trashed,size,parents"
+PERM_FIELDS = "permissions(type,role,emailAddress,deleted)"
+ACL_TAG = "acl:"  # cursor prefix while readers are synced, so turning them on (or off) re-lists once
 _ALL_DRIVES = {"supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
 
 
@@ -102,7 +109,8 @@ class TokenSource:
 
 class GoogleDrive:
     def __init__(self, tokens: TokenSource | None = None, http: httpx.Client | None = None, page_size: int = 100,
-                 retries: int = 4, sleep: Callable[[float], None] = time.sleep, folders: list[str] | None = None):
+                 retries: int = 4, sleep: Callable[[float], None] = time.sleep, folders: list[str] | None = None,
+                 readers: bool | None = None):
         self.http = http or httpx.Client(timeout=60)
         self.tokens = tokens or TokenSource.from_env(self.http)
         self.page_size, self.retries, self.sleep = page_size, retries, sleep
@@ -113,6 +121,10 @@ class GoogleDrive:
         for f in self.roots:
             if "'" in f or "\\" in f:
                 raise DriveError(f"not a Drive folder id: {f!r}")
+        if readers is None:
+            readers = os.environ.get("DB4AI_GDRIVE_READERS", "").strip().lower() in ("1", "true", "yes", "on")
+        self.readers = readers  # send each file's shared-with users as reader_emails
+        self.fields = FILE_FIELDS + ("," + PERM_FIELDS if readers else "")
         self._scope: dict[str, list[str]] | None = None  # folder id -> parent ids, resolved once per instance
         self._present: set[str] | None = None  # synced file ids in scope, listed once for the deletion checks
         # Dataset keys (`<file id>#<sheet id>`) DB4AI holds as live; set by connectors.run, kept current as we emit.
@@ -130,7 +142,7 @@ class GoogleDrive:
     def cursor_tag(self) -> str:
         """Prefix of every cursor: the folder scope (if any) and the synced file types. A cursor with another prefix
         starts a fresh full listing."""
-        return (self.scope_tag if self.scoped else "") + TYPES_TAG
+        return (self.scope_tag if self.scoped else "") + TYPES_TAG + (ACL_TAG if self.readers else "")
 
     # ------------------------------------------------------------ HTTP
 
@@ -281,8 +293,46 @@ class GoogleDrive:
             if f.get("webViewLink"):
                 meta["web_view_link"] = f["webViewLink"]
             out.append(Record(key=f["id"], type="document", title=f.get("name") or f["id"], body=body,
-                              metadata=meta))
+                              metadata=meta, reader_emails=self._reader_emails(f) if self.readers else None))
         return out
+
+    def _permissions(self, f: dict) -> list[dict] | None:
+        """The file's permissions: from the listing, else `permissions.list` (Drive omits them for shared-drive items
+        and files the account can't share). None when Drive won't list them."""
+        if "permissions" in f:
+            return f["permissions"]
+        out, page = [], None
+        while True:
+            params = {"fields": f"nextPageToken,{PERM_FIELDS}", "supportsAllDrives": "true", "pageSize": 100}
+            if page:
+                params["pageToken"] = page
+            r = self._get(f"/files/{f['id']}/permissions", params)
+            if r.status_code in (403, 404):
+                log.info("Drive file %s: permissions not visible (%s); access left as is", f["id"], r.status_code)
+                return None
+            if r.status_code != 200:
+                raise DriveError(f"Drive permissions of {f['id']} failed ({r.status_code}): {_reason(r)}")
+            data = r.json()
+            out += data.get("permissions", [])
+            page = data.get("nextPageToken")
+            if not page:
+                return out
+
+    def _reader_emails(self, f: dict) -> list[str] | None:
+        """Emails of the users a file is shared with; None when anyone or a whole domain can read it, or when the
+        permissions can't be read (the source says nothing)."""
+        perms = self._permissions(f)
+        if perms is None:
+            return None
+        emails = set()
+        for p in perms:
+            if p.get("deleted"):
+                continue
+            if p.get("type") in ("anyone", "domain"):
+                return None
+            if p.get("type") == "user" and p.get("emailAddress"):
+                emails.add(p["emailAddress"].strip().lower())
+        return sorted(emails)
 
     # ------------------------------------------------------------ spreadsheets → datasets
 
@@ -370,10 +420,10 @@ class GoogleDrive:
 
     def fetch(self, cursor: str | None) -> Iterator[Batch]:
         tag = self.cursor_tag
-        if cursor and not cursor.startswith(tag):
+        if cursor and (not cursor.startswith(tag) or not self.readers and cursor[len(tag):].startswith(ACL_TAG)):
             if not cursor.startswith(("scope:", "types:", "list:", "changes:")):
                 raise DriveError(f"not a Google Drive cursor: {cursor!r}")
-            log.info("Drive folder scope or synced file types changed: starting a full listing")
+            log.info("Drive folder scope, synced file types or readers setting changed: starting a full listing")
             cursor = None
         inner = cursor[len(tag):] if cursor else None
         for b in self._fetch(inner):
@@ -398,7 +448,7 @@ class GoogleDrive:
             return
         while True:
             params = {"q": _SYNCED_Q, "pageSize": self.page_size, "corpora": "allDrives", "orderBy": "modifiedTime",
-                      "fields": f"nextPageToken,files({FILE_FIELDS})", **_ALL_DRIVES}
+                      "fields": f"nextPageToken,files({self.fields})", **_ALL_DRIVES}
             if page:
                 params["pageToken"] = page
             data = self._json("/files", params)
@@ -423,7 +473,7 @@ class GoogleDrive:
             q = _with_parents(_SYNCED_Q, chunks[i])
             while True:
                 params = {"q": q, "pageSize": self.page_size, "corpora": "allDrives",
-                          "fields": f"nextPageToken,files({FILE_FIELDS})", **_ALL_DRIVES}
+                          "fields": f"nextPageToken,files({self.fields})", **_ALL_DRIVES}
                 if page:
                     params["pageToken"] = page
                 data = self._json("/files", params)
@@ -442,7 +492,7 @@ class GoogleDrive:
     def _moved_in(self, folder: str, cursor: str) -> Iterator[Batch]:
         """A folder that moved into scope (or was created there with files): its existing files don't show up in
         the changes feed, so list them. The cursor doesn't move; re-sending is idempotent."""
-        files = list(self._query(_SYNCED_Q, self._subtree(folder), FILE_FIELDS))
+        files = list(self._query(_SYNCED_Q, self._subtree(folder), self.fields))
         for i in range(0, len(files), self.page_size):
             yield from self._sheet_batches(files[i:i + self.page_size], cursor)
             records = self._records(files[i:i + self.page_size])
@@ -453,7 +503,7 @@ class GoogleDrive:
         while True:
             data = self._json("/changes", {
                 "pageToken": token, "pageSize": self.page_size, "includeRemoved": "true", "spaces": "drive",
-                "fields": f"nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_FIELDS}))",
+                "fields": f"nextPageToken,newStartPageToken,changes(fileId,removed,file({self.fields}))",
                 **_ALL_DRIVES})
             changes = data.get("changes", [])
             # Removed (deleted, or the account lost access) or trashed: DB4AI can no longer read it from Drive, so

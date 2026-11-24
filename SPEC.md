@@ -163,6 +163,8 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   `connector:<source>`, payload `source_readers` and `acl_changes` = the item's ACL change count, so a re-sent batch
   is the same decision, a rejected change isn't re-proposed, and a later real change is a new decision). A newer reader
   set from the source withdraws (status `expired`) a pending one from that source, as does a set that matches the ACL.
+  A record may give `reader_emails` instead of (or as well as) names, matched to `actors.email`; unmatched emails are
+  dropped like unknown names. Either list being set means the source says something.
 - **Source deletions**: a batch can also carry `deleted` keys (counted toward the 500). Each one whose item in the team
   is active or stale gets an `archive_item` proposal in the same transaction (source `connector:<source>`, payload
   item id, `for_version` and `source_deleted`; no key or title), tiered by `policies` (`ask_first` by default). Unknown,
@@ -212,6 +214,12 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   spreadsheet the Sheets API refuses (403/404) is skipped and nothing is reported deleted. Each spreadsheet's tabs go in
   their own batch(es) at the cursor its page started from, before the page's batch. A tab removed from a spreadsheet,
   and every tab of a removed/trashed/out-of-scope spreadsheet, is reported in `deleted_datasets` (→ `archive_dataset`).
+  **Readers** (`--readers` or `DB4AI_GDRIVE_READERS=1`; off by default): each file's `user` permissions (any role,
+  not `deleted`) are sent as `reader_emails`. A file shared with `anyone` or a `domain` sends None (team-wide); `group`
+  permissions are ignored (groups aren't expanded), which only narrows. Permissions missing from the listing
+  (shared-drive items, files the account can't share) are read with `permissions.list`; a 403/404 there sends None
+  (access left as is). While on, the cursor carries `acl:` after the types tag, so turning it on or off re-lists once.
+  Sheets carry no readers (datasets have no ACL).
 - More connectors (Notion, Miro, Slack) build on the same framework.
 
 ## 7. Stack
@@ -222,6 +230,8 @@ enrichment and proposals with a heuristic fallback when no API key is set, plugg
 
 ## 8. Access control
 - Teams; actors are `human` or `agent`. Roles: `admin`, `owner`, `member` (per team), `agent`.
+- An actor may have one `email` (lowercase, unique; `db4ai user --email`, `db4ai email NAME ADDRESS|--clear`), used
+  only to map a source's users (e.g. Drive permissions) to actors.
 - Every item belongs to one team; reads and writes are limited to the actor's teams (admins see all).
 - API tokens (stored hashed). Harness decisions are routed to owners of the scope team; admins can decide anything.
 - **Per-item ACLs** (`item_acl`): an item may be restricted to a list of readers, who must be members of its team.

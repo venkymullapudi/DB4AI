@@ -43,6 +43,9 @@ class Record:
     # (the whole team, or the item's current access stays). Names that aren't members of the team are dropped:
     # access only narrows. See `_sync_readers`.
     readers: list[str] | None = None
+    # The same, as email addresses (matched to `actors.email`), for sources that only know emails (e.g. Drive).
+    # The record says something about access when either list is set.
+    reader_emails: list[str] | None = None
 
 
 @dataclass
@@ -116,13 +119,20 @@ def _propose_deletion(conn: Conn, actor: Actor, source: str, team_id: UUID, key:
     return out
 
 
-def _team_readers(conn: Conn, team_id: UUID, names: list[str]) -> tuple[list[UUID], list[str]]:
-    """Resolve reader names to members of the team; the rest (unknown actors, other teams) are returned as dropped."""
-    names = sorted(set(names))
-    rows = conn.execute("select a.id, a.name from actors a join team_members m on m.actor_id = a.id"
-                        " where m.team_id = %s and a.name = any(%s)", (team_id, names)).fetchall()
-    found = {r["name"]: r["id"] for r in rows}
-    return [found[n] for n in names if n in found], [n for n in names if n not in found]
+def _team_readers(conn: Conn, team_id: UUID, names: list[str] | None,
+                  emails: list[str] | None = None) -> tuple[list[UUID], list[str]]:
+    """Resolve reader names and emails to members of the team; the rest (unknown actors or emails, other teams) are
+    returned as dropped."""
+    names = sorted(set(names or []))
+    emails = sorted({e.strip().lower() for e in emails or []})
+    rows = conn.execute("select a.id, a.name, a.email from actors a join team_members m on m.actor_id = a.id"
+                        " where m.team_id = %s and (a.name = any(%s) or a.email = any(%s))",
+                        (team_id, names, emails)).fetchall()
+    by_name = {r["name"]: r["id"] for r in rows}
+    by_email = {r["email"]: r["id"] for r in rows if r["email"]}
+    ids = {by_name[n] for n in names if n in by_name} | {by_email[e] for e in emails if e in by_email}
+    dropped = [n for n in names if n not in by_name] + [e for e in emails if e not in by_email]
+    return sorted(ids, key=str), dropped
 
 
 def _sync_readers(conn: Conn, actor: Actor, prov: Provenance, source: str, item_id: UUID,
@@ -253,7 +263,8 @@ def apply_batch(conn: Conn, actor: Actor, source: str, team_id: UUID, records: l
             raise CursorConflict(f"cursor for {source} moved (expected {expected_cursor!r}, found {row['cursor']!r})")
         for rec in records:
             ext = f"{source}:{rec.key}"
-            readers, dropped = (None, []) if rec.readers is None else _team_readers(conn, team_id, rec.readers)
+            readers, dropped = ((None, []) if rec.readers is None and rec.reader_emails is None
+                                else _team_readers(conn, team_id, rec.readers, rec.reader_emails))
             exists = readers is not None and conn.execute(
                 "select 1 from items where team_id=%s and type=%s and external_key=%s",
                 (team_id, rec.type, ext)).fetchone() is not None
@@ -303,11 +314,11 @@ def run(conn: Conn, actor: Actor, source: str, team_id: UUID, connector: Connect
     if hasattr(connector, "known_datasets"):
         connector.known_datasets = live_dataset_keys(conn, actor, source, team_id)
     total = {"source": source, "batches": 0, "saved": 0, "changed": 0, "erased": 0, "deleted": 0,
-             "datasets": 0, "datasets_deleted": 0, "cursor": cursor}
+             "datasets": 0, "datasets_deleted": 0, "access_proposed": 0, "cursor": cursor}
 
     def add(r):
         total["batches"] += 1
-        for k in ("saved", "changed", "erased", "deleted", "datasets_deleted"):
+        for k in ("saved", "changed", "erased", "deleted", "datasets_deleted", "access_proposed"):
             total[k] += r[k]
         total["datasets"] += len(r["datasets"])
 

@@ -70,6 +70,7 @@ class SyncItemIn(BaseModel):
     body: str = ""
     metadata: dict = {}
     readers: list[str] | None = None  # actor names who can read it in the source; None = the source says nothing
+    reader_emails: list[str] | None = None  # the same as emails, matched to actors' emails
 
 
 class SyncDatasetIn(BaseModel):

@@ -700,3 +700,30 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
 - **Q: `readers` = None?** The source says nothing: never changes access, and never lifts a restriction. Lifting from
   a sync would need an explicit "public" signal; not needed until a connector has one.
 - **Not owner-level:** no migration, no data deleted, no new service.
+
+## 2026-11-25 — Drive permissions as readers
+Grilled one question at a time; each answer is the recommended one, resolved from the code.
+- **Q: How do Drive emails become actors?** A new optional `actors.email` (migration 017, unique case-insensitively,
+  stored lowercase). Set with `db4ai user NAME --email E` or `db4ai email NAME E` (the second issues no token).
+  No email = never matched, so nothing changes for existing actors until an admin maps them.
+- **Q: Names or emails on the record?** A separate `Record.reader_emails` (and `reader_emails` on `POST /sync`), not
+  mixed into `readers`: an actor name may contain "@", and keeping them apart means no guessing. A record says
+  something about access when either list is set; both resolve to team members, the rest is `readers_dropped`.
+- **Q: Which permissions count?** `user` permissions of any role (owner, writer, commenter, reader all read), skipping
+  `deleted` ones. An `anyone` or `domain` permission means everybody in the company can read: `reader_emails` = None
+  (the source says nothing; a new item is team-wide). `group` permissions are ignored: DB4AI can't expand a group
+  without the Admin SDK, and ignoring them only narrows (fail closed). Documented so an owner can map people instead.
+- **Q: Files whose permissions aren't in `files.list`?** Drive omits `permissions` for shared-drive items and files
+  the account can't share. Then the connector calls `permissions.list`; a 403/404 there means "unknown", which is
+  None (access unchanged), not "nobody", so a viewer-only token doesn't lock the team out of everything.
+- **Q: On by default?** No: `--readers` / `DB4AI_GDRIVE_READERS=1`. Turning it on changes who can read newly synced
+  files and proposes a `set_item_access` per already-synced restricted file, so it's the owner's switch.
+- **Q: Existing items when it's turned on?** The cursor gains an `acl:` tag, so the next sync re-lists once (content is
+  idempotent) and each existing file whose readers differ gets an `ask_first` proposal. Turning it off re-lists once
+  too and changes nothing (None never changes access).
+- **Q: Sheets?** Datasets have no per-row/per-table ACL yet, so Sheets carry no readers. Unchanged.
+- **Q: A file going public later?** None leaves an existing restriction in place (as decided for the framework). Lifting
+  on an explicit "public" signal is a new roadmap item.
+- **Not owner-level:** additive nullable column, opt-in behaviour, no data deleted, no new service.
+- **Found on the way:** `connectors.run` (what `db4ai sync` prints) didn't sum `access_proposed` across batches, so a
+  sync that proposed access changes reported none. It now does.

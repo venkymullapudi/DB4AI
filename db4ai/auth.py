@@ -64,12 +64,32 @@ def team_id_by_name(conn: Conn, name: str) -> UUID:
     return row["id"]
 
 
-def create_actor(conn: Conn, name: str, kind: str = "human", is_admin: bool = False) -> UUID:
+def normalize_email(email: str) -> str:
+    e = email.strip().lower()
+    local, at, domain = e.partition("@")
+    if not (local and at and domain) or any(c.isspace() for c in e):
+        raise ValueError(f"not an email address: {email!r}")
+    return e
+
+
+def create_actor(conn: Conn, name: str, kind: str = "human", is_admin: bool = False,
+                 email: str | None = None) -> UUID:
+    """Create (or update) an actor. `email` lets connectors map a source's users to it; None keeps the current one."""
     row = conn.execute(
-        "insert into actors (name, kind, is_admin) values (%s, %s, %s)"
-        " on conflict (name) do update set is_admin = excluded.is_admin returning id",
-        (name, kind, is_admin),
+        "insert into actors (name, kind, is_admin, email) values (%s, %s, %s, %s)"
+        " on conflict (name) do update set is_admin = excluded.is_admin,"
+        " email = coalesce(excluded.email, actors.email) returning id",
+        (name, kind, is_admin, None if email is None else normalize_email(email)),
     ).fetchone()
+    return row["id"]
+
+
+def set_email(conn: Conn, name: str, email: str | None) -> UUID:
+    """Map an existing actor to an email address (None clears it). Raises KeyError for an unknown actor."""
+    row = conn.execute("update actors set email=%s where name=%s returning id",
+                       (None if email is None else normalize_email(email), name)).fetchone()
+    if row is None:
+        raise KeyError(name)
     return row["id"]
 
 
