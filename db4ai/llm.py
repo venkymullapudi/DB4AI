@@ -55,11 +55,32 @@ class LLM(Protocol):
 # ---------------------------------------------------------------- heuristic (offline)
 
 _CAP = re.compile(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)*)\b")
+_CALENDAR = {"jan", "january", "feb", "february", "mar", "march", "apr", "april", "may", "jun", "june", "jul",
+             "july", "aug", "august", "sep", "sept", "september", "oct", "october", "nov", "november", "dec",
+             "december", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
 _DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2})\b", re.I)
 
 
 class HeuristicLLM:
     name = "heuristic"
+
+    @staticmethod
+    def _entities(text: str) -> list[str]:
+        """Capitalised names that don't merely start a sentence or line."""
+        starts = {m.end() for m in re.finditer(r"(?:^|[.!?]\s+|\n)", text)}
+        ents = []
+        for m in _CAP.finditer(text):
+            name = m.group(1)
+            if m.start() in starts:  # "The Atlas" at a sentence start: keep "Atlas"
+                name = name.partition(" ")[2].lstrip()
+            if name and name not in ents and len(name) > 2:
+                ents.append(name)
+        return ents
+
+    @classmethod
+    def _subjects(cls, text: str) -> set[str]:
+        """Name words a fact is about (months and weekdays are facts, not subjects)."""
+        return {w for e in cls._entities(text) for w in e.lower().split()} - _CALENDAR
 
     def enrich(self, title: str, body: str) -> Enrichment:
         text = f"{title}\n{body}"
@@ -67,21 +88,22 @@ class HeuristicLLM:
         summary = " ".join(sentences[:2])[:400] or title
         counts = Counter(t for t in tokens(text) if not t.isdigit() and len(t) > 3)
         tags = [t for t, _ in counts.most_common(6)]
-        starts = {m.start() for m in re.finditer(r"(?:^|[.!?]\s+|\n)", text)}
-        ents = []
-        for m in _CAP.finditer(text):
-            if m.group(1) not in ents and m.start() not in starts and len(m.group(1)) > 2:
-                ents.append(m.group(1))
-        return Enrichment(summary=summary, tags=tags, entities=ents[:12])
+        return Enrichment(summary=summary, tags=tags, entities=self._entities(text)[:12])
 
     def contradiction(self, old: str, new: str) -> Contradiction:
-        """Same subject, different dates/numbers -> likely superseded."""
+        """Same subject, different dates/numbers -> likely superseded.
+
+        When both texts name something (a project, customer, product) and they name nothing in common, a changed
+        date or number is about a different subject, not a contradiction.
+        """
         old_t, new_t = set(tokens(old)), set(tokens(new))
         overlap = len(old_t & new_t) / max(1, min(len(old_t), len(new_t)))
         old_facts = {d.lower() for d in _DATE.findall(old)} | set(re.findall(r"\b\d+(?:\.\d+)?\b", old))
         new_facts = {d.lower() for d in _DATE.findall(new)} | set(re.findall(r"\b\d+(?:\.\d+)?\b", new))
         changed = bool(old_facts and new_facts and old_facts != new_facts and not old_facts <= new_facts)
-        hit = overlap >= 0.4 and changed
+        old_s, new_s = self._subjects(old), self._subjects(new)
+        other_subject = bool(old_s and new_s and not old_s & new_s)
+        hit = overlap >= 0.4 and changed and not other_subject
         return Contradiction(
             contradicts=hit,
             explanation=(f"Same topic; facts changed from {sorted(old_facts)} to {sorted(new_facts)}" if hit

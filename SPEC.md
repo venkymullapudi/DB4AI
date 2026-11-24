@@ -69,7 +69,9 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
    applied by one `enrich` action, so each enrichment is one harness decision and one new version.
 2. **link** — connect related items (embedding similarity + shared entities, Obsidian wikilinks).
 3. **dedup** — near-duplicate items → propose merge.
-4. **staleness** — newer items contradicting older memories → propose mark-stale.
+4. **staleness** — newer items contradicting older memories → propose mark-stale. The offline heuristic needs the
+   same topic and a changed date or number, and refuses when both items name something (project, customer) but
+   name nothing in common; month and weekday names are facts, not subjects.
 5. **schema** — recurring metadata shape across items of one type → propose promoting it to a table.
 6. **hygiene** — orphan blob GC, embedding rebuilds, expiring harness decisions.
 

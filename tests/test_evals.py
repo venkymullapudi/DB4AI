@@ -21,10 +21,28 @@ def test_builtin_set_is_well_formed():
 def test_heuristic_baseline_does_not_regress():
     r = evals.run(evals.load_cases(), HeuristicLLM(), HashEmbedder(), dup_threshold=0.92)
     dedup, stale = r["tasks"]["dedup"], r["tasks"]["staleness"]
-    # Floors pinned at the 2026-11-24 baseline; raise them when the offline maintainers improve.
+    # Floors pinned at the current baseline; raise them when the offline maintainers improve.
     assert dedup["precision"] >= 1.0 and dedup["recall"] >= 0.83
-    assert stale["precision"] >= 0.8 and stale["recall"] >= 0.57
-    assert {m["id"] for m in r["misses"]} >= {"stale-owner"}  # no digits: the heuristic can't see it
+    assert stale["precision"] >= 1.0 and stale["recall"] >= 0.62
+    missed = {m["id"] for m in r["misses"]}
+    assert "stale-owner" in missed  # no digits: the heuristic can't see it
+    assert not missed & {"stale-other-subject", "stale-other-customer", "stale-month-moved"}
+
+
+@pytest.mark.parametrize("old, new, expected", [
+    ("The Atlas launch date is 2026-03-01.", "The Hermes launch date is 2026-06-10.", False),  # other subject
+    ("The Atlas launch date is 2026-03-01.", "The Atlas launch date is 2026-06-10.", True),  # shared subject
+    ("The launch date is 2026-03-01.", "The Hermes launch date is 2026-06-10.", True),  # only one side names one
+    ("The Atlas beta opens on March 3.", "The Atlas beta now opens on April 14.", True),  # months aren't subjects
+    ("The launch is on March 3.", "The launch is now on April 14.", True),
+])
+def test_heuristic_contradiction_needs_a_shared_subject(old, new, expected):
+    assert HeuristicLLM().contradiction(old, new).contradicts is expected
+
+
+def test_heuristic_entities_drop_only_the_sentence_start_word():
+    e = HeuristicLLM().enrich("Atlas launch date", "The Atlas launch moved. We told Globex Corp on Friday.").entities
+    assert "Atlas" in e and "Globex Corp" in e and not any(x.startswith(("The ", "We ")) for x in e)
 
 
 def test_metrics_and_relate_rules_are_applied():
@@ -76,7 +94,7 @@ def test_cli_eval_gates_on_precision(tmp_path, capsys, monkeypatch):
     main(["eval", "--llm", "heuristic", "--min-precision", "0.5"])
     capsys.readouterr()
     with pytest.raises(SystemExit) as e:
-        main(["eval", "--llm", "heuristic", "--min-precision", "0.99"])
+        main(["eval", "--llm", "heuristic", "--dup-threshold", "0.3", "--min-precision", "0.99"])
     assert e.value.code == 1
     # a low threshold merges the hard negatives: the gate catches it
     with pytest.raises(SystemExit):

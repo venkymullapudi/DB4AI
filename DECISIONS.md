@@ -638,3 +638,23 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
 - **Q: Regression tests?** The set's shape is checked (unique ids, known tasks, both labels per task) and the heuristic
   baseline is pinned as a floor, so a change that makes the offline maintainers worse fails the suite.
 - **Not owner-level:** read-only, no migration, no new service; Claude usage is opt-in and on the owner's own key.
+
+## 2026-11-24 — Heuristic staleness precision
+Grilled one question at a time; each answer is the recommended one, resolved from the code.
+- **Q: What is a fact's "subject" offline?** The capitalised names the heuristic already extracts for enrichment
+  (project, customer, product, person), split into lowercase words. No new model or dependency.
+- **Q: When does a missing shared subject block a contradiction?** Only when *both* texts name something and the
+  name sets are disjoint. If either side names nothing ("Support SLA", "platform team"), the old rule stands, so
+  recall on unnamed facts is unchanged. Sharing one word (e.g. "Atlas" in "Atlas release") is enough.
+- **Q: Months and weekdays?** Excluded from subjects: they are the facts that change ("March 3" → "April 14"), so
+  counting them as subjects would suppress exactly the contradictions we want. New eval case `stale-month-moved`.
+- **Q: Sentence-start names?** `_CAP` matched "The Atlas" as one name at a line start, and the old start check never
+  fired after a newline (it compared the separator's start, not the next word's). Now only the sentence-initial word
+  is dropped ("The Atlas" → "Atlas"). This also changes `enrich` entities, for the better (no "The Atlas"); the
+  suite is unchanged otherwise.
+- **Q: Does the Claude path change?** No: its prompt already says topic overlap alone isn't a contradiction. This is
+  the offline fallback that `auto_notice` stale marks use without review.
+- **Q: Floors?** Staleness precision 0.8 → 1.0, recall 0.57 → 0.62 (new positive case caught), with
+  `stale-other-subject`, new hard negative `stale-other-customer` and `stale-month-moved` pinned as non-misses. The
+  CLI gate test now forces a failure with `--dup-threshold 0.3`, since both tasks score 1.0 at the defaults.
+- **Not owner-level:** heuristic-only, no migration, no data touched.

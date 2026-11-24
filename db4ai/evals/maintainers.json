@@ -418,6 +418,38 @@
       },
       "expected": false,
       "note": "a question, not a change"
+    },
+    {
+      "id": "stale-month-moved",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Atlas beta",
+        "body": "The Atlas beta opens to customers on March 3."
+      },
+      "new": {
+        "type": "meeting",
+        "title": "Atlas beta slips",
+        "body": "After the review the Atlas beta now opens to customers on April 14."
+      },
+      "expected": true,
+      "note": "same project, dates as month names: months are facts, not subjects"
+    },
+    {
+      "id": "stale-other-customer",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Acme renewal",
+        "body": "The Acme contract renews at 120 seats on 2026-09-01."
+      },
+      "new": {
+        "type": "meeting",
+        "title": "Globex renewal",
+        "body": "The Globex contract renews at 45 seats on 2026-11-15."
+      },
+      "expected": false,
+      "note": "same template for another customer: different subject"
     }
   ]
 }
