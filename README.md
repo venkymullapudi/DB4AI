@@ -34,8 +34,8 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
 - **Self-maintenance.** Background maintainers enrich items (summary, tags, entities, embeddings), link related
   items, merge near-duplicates, mark memories stale when newer items contradict them, propose turning
   recurring metadata into real tables, and clean up after themselves.
-- **Risk tiers, fail closed.** `auto` changes apply and are logged. `auto_notice` changes apply and can be
-  reverted for N days. `ask_first` changes wait in the AIDBHarness. A per-team policy table, not the AI,
+- **Risk tiers, fail closed.** `auto` changes apply and are logged. `auto_notice` changes apply, are announced to
+  the notification webhooks, and can be reverted for N days. `ask_first` changes wait in the AIDBHarness. A per-team policy table, not the AI,
   decides the tier, and unknown actions are always `ask_first`.
 - **AIDBHarness.** Approving a decision applies the change in the same transaction. Rejections are
   remembered, and expired decisions are never applied. You can answer from Claude (MCP), the web page or the HTTP API.
@@ -142,7 +142,7 @@ db4ai eval --llm claude --min-precision 0.9
 | `DB4AI_EMBEDDER` | `hash` | `voyage` (needs `VOYAGE_API_KEY`) |
 | `DB4AI_CHUNK_CHARS` | `1500` | long items are split into chunks of at most this size; search returns the best chunk |
 | `DB4AI_VECTOR_CANDIDATES` | `200` | nearest rows taken from the vector index before team/type filters; too few results after filtering falls back to an exact scan |
-| `DB4AI_NOTIFY_WEBHOOKS` | — | comma-separated Slack/Teams incoming-webhook URLs notified of pending harness decisions; prefix `teams:` for a Teams Workflows webhook (Adaptive Card) |
+| `DB4AI_NOTIFY_WEBHOOKS` | — | comma-separated Slack/Teams incoming-webhook URLs notified of pending harness decisions and of `auto_notice` changes (stale marks, merges) that can still be reverted; prefix `teams:` for a Teams Workflows webhook (Adaptive Card) |
 | `DB4AI_ASK_LOG` | `off` | audit log of `ask` calls (`GET /ask/log`): `ids` records who asked, a hash of the question and which item versions were searched and cited; `text` also keeps the question |
 | `DB4AI_WEBHOOK_<NAME>` | — | a team's own Slack/Teams webhook (same format as `DB4AI_NOTIFY_WEBHOOKS`); route a team to it with `db4ai notify-route add <team> DB4AI_WEBHOOK_<NAME> --as <admin or owner>` or `PUT /teams/{team}/notify-routes/DB4AI_WEBHOOK_<NAME>`; erasure/redaction requests only go to the global webhooks |
 | `DB4AI_NOTIFY_DELAY_SECONDS` | `60` | wait before sending, so a burst of proposals becomes one message |

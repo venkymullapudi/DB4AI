@@ -104,6 +104,11 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   POST retries with the queue's backoff (at-least-once). Messages carry action type, team, confidence, proposer,
   expiry, decision id and a review link (`DB4AI_PUBLIC_URL`), never item content, reasons or diffs, since a chat
   message can't be erased later.
+- **Notices for `auto_notice` changes**: a decision applied with tier `auto_notice` queues the same `notify` jobs in
+  its applying transaction (plain `auto` doesn't). At send time the job also names `auto_notice` decisions still
+  `applied_auto` inside their revert window and not yet sent to that webhook (reverted or out of window: skipped), in a
+  second section "applied automatically, revertible" with each one's revert-by date and a link to
+  `/harness?status=applied_auto`. Same routing, content rules and `notifications` rows as pending decisions.
 - **Per-team routing**: `notify_routes` maps a team to the *name* of an env var (`DB4AI_WEBHOOK_<NAME>`, enforced by a
   check constraint) that holds its webhook URL(s) in the same format; URLs never enter the database. Global webhooks
   (`DB4AI_NOTIFY_WEBHOOKS`) still hear about every decision; a team route hears about its team's decisions except

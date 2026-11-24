@@ -1,4 +1,7 @@
-"""Slack/Teams notifications for pending harness decisions, delivered through the outbox (`jobs`).
+"""Slack/Teams notifications for harness decisions, delivered through the outbox (`jobs`).
+
+Two kinds of decision are announced: pending ones (waiting for review) and `auto_notice` ones that applied
+automatically and can still be reverted (the notice is what makes the revert window useful).
 
 * `propose` queues one `notify` job per webhook that should hear about the decision, in the proposing
   transaction, so a notification exists iff the decision committed. Jobs are deduped per webhook and delayed
@@ -6,10 +9,10 @@
 * Global webhooks (`DB4AI_NOTIFY_WEBHOOKS`) hear about every decision. A team route (`notify_routes`: team →
   name of an env var `DB4AI_WEBHOOK_*` holding the URL) hears about that team's decisions, except admin-only
   actions (erasure/redaction), which only admins can decide. The same URL in several places is one webhook.
-* The job re-reads the decisions at send time: only those still pending, unexpired and not yet sent to that
-  webhook are named. Sent rows are recorded in `notifications` after the POST succeeds (at-least-once).
+* The job re-reads the decisions at send time: only those still pending and unexpired, or still applied
+  inside their revert window, and not yet sent to that webhook are named. Sent rows are recorded in `notifications` after the POST succeeds (at-least-once).
 * Messages hold no item content (no reason, diff, payload or evidence): a chat message can't be erased later.
-  They name the action, team, confidence, proposer, expiry and a link to the harness page.
+  They name the action, team, confidence, proposer, expiry or revert deadline and a link to the harness page.
 """
 
 from __future__ import annotations
@@ -79,7 +82,7 @@ def _admin_only() -> frozenset[str]:
 
 
 def queue(conn: Conn, team_id: UUID | None = None, action_type: str | None = None) -> None:
-    """Called in the transaction that created a pending decision of `action_type` for `team_id`."""
+    """Called in the transaction that created a pending (or auto_notice) decision of `action_type` for `team_id`."""
     delay = settings().notify_delay_seconds
     routed = team_id is not None and action_type not in _admin_only()
     for wid, hook in webhooks(conn).items():
@@ -89,9 +92,11 @@ def queue(conn: Conn, team_id: UUID | None = None, action_type: str | None = Non
 
 def unsent(conn: Conn, hook: Webhook) -> list[dict]:
     return conn.execute(
-        "select d.id, d.action_type, d.confidence, d.expires_at, t.name as team, a.name as proposed_by"
+        "select d.id, d.action_type, d.status, d.confidence, d.expires_at, d.revert_until,"
+        " t.name as team, a.name as proposed_by"
         " from harness_decisions d left join teams t on t.id = d.team_id join actors a on a.id = d.proposed_by"
-        " where d.status = 'pending' and (d.expires_at is null or d.expires_at > now())"
+        " where ((d.status = 'pending' and (d.expires_at is null or d.expires_at > now()))"
+        "   or (d.status = 'applied_auto' and d.tier = 'auto_notice' and d.revert_until > now()))"
         " and (%s or (d.team_id = any(%s) and d.action_type <> all(%s)))"
         " and not exists (select 1 from notifications n where n.decision_id = d.id and n.webhook = %s)"
         " order by d.proposed_at, d.id",
@@ -141,21 +146,58 @@ def routes(conn: Conn, actor: Actor, team_id: UUID) -> list[dict]:
     return [route(team_id, r["env_name"]) for r in rows]
 
 
+def _applied(d: dict) -> bool:
+    return d.get("status") == "applied_auto"
+
+
 def _line(d: dict) -> str:
     conf = f", confidence {d['confidence']:.2f}" if d["confidence"] is not None else ""
-    exp = f", expires {d['expires_at']:%Y-%m-%d}" if d["expires_at"] is not None else ""
-    return f"• {d['action_type']} (team {d['team'] or 'global'}{conf}) proposed by {d['proposed_by']}{exp} [{d['id']}]"
+    if _applied(d):
+        when = f", revert by {d['revert_until']:%Y-%m-%d}" if d.get("revert_until") is not None else ""
+        verb = "applied for"
+    else:
+        when = f", expires {d['expires_at']:%Y-%m-%d}" if d["expires_at"] is not None else ""
+        verb = "proposed by"
+    return f"• {d['action_type']} (team {d['team'] or 'global'}{conf}) {verb} {d['proposed_by']}{when} [{d['id']}]"
+
+
+def _summary(ds: list[dict]) -> str:
+    counts = Counter(d["action_type"] for d in ds)
+    return ", ".join(f"{c} × {a}" for a, c in sorted(counts.items()))
 
 
 def message(decisions: list[dict], base_url: str | None) -> tuple[str, list[str]]:
-    n = len(decisions)
-    counts = Counter(d["action_type"] for d in decisions)
-    summary = ", ".join(f"{c} × {a}" for a, c in sorted(counts.items()))
-    title = f"DB4AI: {n} harness decision{'s' if n != 1 else ''} waiting for review ({summary})"
-    lines = [_line(d) for d in decisions[:MAX_LISTED]]
-    if n > MAX_LISTED:
-        lines.append(f"…and {n - MAX_LISTED} more")
-    lines.append(f"Review: {base_url.rstrip('/')}/harness" if base_url else "Review: /harness or harness_list_pending")
+    """Title and lines: pending decisions first, then auto_notice changes that can still be reverted."""
+    pending = [d for d in decisions if not _applied(d)]
+    applied = [d for d in decisions if _applied(d)]
+    parts = []
+    if pending:
+        n = len(pending)
+        parts.append(f"{n} harness decision{'s' if n != 1 else ''} waiting for review ({_summary(pending)})")
+    if applied:
+        n = len(applied)
+        parts.append(f"{n} change{'s' if n != 1 else ''} applied automatically, revertible ({_summary(applied)})")
+    title = "DB4AI: " + "; ".join(parts)
+    lines: list[str] = []
+    budget = MAX_LISTED
+    base = base_url.rstrip("/") if base_url else None
+    for group, heading, link in ((pending, None, "/harness"),
+                                 (applied, "Applied automatically (revert before the date if wrong):",
+                                  "/harness?status=applied_auto")):
+        if not group:
+            continue
+        if heading and pending:
+            lines.append(heading)
+        shown = group[:budget]
+        budget -= len(shown)
+        lines.extend(_line(d) for d in shown)
+        if len(group) > len(shown):
+            lines.append(f"…and {len(group) - len(shown)} more")
+    if pending:
+        lines.append(f"Review: {base}/harness" if base else "Review: /harness or harness_list_pending")
+    if applied:
+        lines.append(f"Revert: {base}/harness?status=applied_auto" if base
+                     else "Revert: /harness?status=applied_auto or harness_revert")
     return title, lines
 
 
@@ -176,7 +218,7 @@ def post_json(url: str, payload: dict) -> None:
 
 
 def send(conn: Conn, webhook: str) -> list[dict]:
-    """Deliver unsent pending decisions to one webhook; returns the decisions named (the caller records them)."""
+    """Deliver unsent pending and revertible auto_notice decisions to one webhook; returns those named."""
     hook = webhooks(conn).get(webhook)
     if hook is None:  # webhook removed from config since the job was queued
         return []

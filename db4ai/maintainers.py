@@ -224,7 +224,7 @@ def blob_delete(ctx: Context, payload: dict) -> Commit | None:
 
 
 def notify(ctx: Context, payload: dict) -> Commit | None:
-    """Send pending harness decisions to one webhook (queued by `harness.propose`), then record what was sent."""
+    """Send pending and auto_notice harness decisions to one webhook (queued by `harness.propose`), then record what was sent."""
     from . import notify as notifications
     webhook = payload["webhook"]
     sent = notifications.send(ctx.conn, webhook)

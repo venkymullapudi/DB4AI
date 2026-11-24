@@ -658,3 +658,24 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
   `stale-other-subject`, new hard negative `stale-other-customer` and `stale-month-moved` pinned as non-misses. The
   CLI gate test now forces a failure with `--dup-threshold 0.3`, since both tasks score 1.0 at the defaults.
 - **Not owner-level:** heuristic-only, no migration, no data touched.
+
+## 2026-11-24 — Notices for `auto_notice` changes
+The roadmap was fully ticked; this run added three items (above) and took the first. Grilled one question at a time;
+each answer is the recommended one, resolved from the code.
+- **Q: Which decisions get a notice?** Those applied with tier `auto_notice` (status `applied_auto`). Not `auto`:
+  every enrichment would page someone, and `auto` makes no revert promise. A team that sets `add_tags` to
+  `auto_notice` opts into notices for it.
+- **Q: A new job kind or the existing one?** The existing `notify` job: `propose` queues it in the applying transaction
+  (same dedupe per webhook and delay), so a burst of proposals and auto-applied changes is one message.
+- **Q: What is named at send time?** Pending, unexpired decisions as before, plus `auto_notice` decisions still
+  `applied_auto` whose `revert_until` is in the future and that weren't sent to that webhook. A change reverted (or
+  out of its window) before the job runs is not named: there is nothing left to act on.
+- **Q: Message shape?** Two sections: "waiting for review" and "applied automatically, revert by <date>", each line
+  with action, team, confidence, proposer and decision id; the `MAX_LISTED` cap covers both. The review link points at
+  `/harness?status=applied_auto` for notices. No item content, as before.
+- **Q: Routing?** Unchanged: global webhooks hear everything, team routes hear their team's (`mark_stale` and
+  `merge_items` aren't admin-only).
+- **Q: Recording?** The same `notifications` row (decision id, webhook hash) after a successful POST; no migration.
+- **Q: Existing auto-applied decisions at upgrade?** Those still inside their window are named in the next message to
+  each webhook (the listing cap keeps it short). They are still revertible, so hearing about them is useful.
+- **Not owner-level:** no data deleted, no migration, no new service or account.

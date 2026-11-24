@@ -56,6 +56,14 @@ right priority, with a one-line reason.
 - [x] **`ask` as of a time.** Answer from items as they read at `as_of` (full-text passages from the old version).
       Why: split from "As of" queries; v1 time travel covers `get_item` and `search` only.
 
+- [x] **Notices for `auto_notice` changes.** Send stale marks and merges that applied automatically to the same
+      webhooks, with their revert deadline. Why: `auto_notice` promises "a human can revert within N days", but only
+      pending decisions were ever announced, so nobody heard about the change in time to revert it.
+- [ ] **Readers on synced records.** Let a connector batch create items restricted to named readers (e.g. from a
+      Drive file's permissions). Why: v1 sync batches can't set readers, so private sources land team-wide.
+- [ ] **Notion connector** on the connector framework (token from env, pages as documents, databases as datasets).
+      Why: the next source named in SPEC §6.
+
 ## Later
 
 - [x] Per-item ACLs beyond team scope. (v1 narrows within a team: named readers + owners + admins.)

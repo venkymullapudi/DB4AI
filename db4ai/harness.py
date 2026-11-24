@@ -119,8 +119,9 @@ def propose(conn: Conn, agent: Actor, action_type: str, payload: dict, *, reason
     if auto:
         result = _apply(conn, decision, prov, payload)
         conn.execute("update harness_decisions set result=%s where id=%s", (Jsonb(result), decision["id"]))
-    else:
-        notify.queue(conn, team_id, action_type)  # outbox: a notification job exists iff this pending decision commits
+    if not auto or tier.tier == "auto_notice":
+        # Outbox: a notification job exists iff this pending (or revertible auto-applied) decision commits.
+        notify.queue(conn, team_id, action_type)
     log_change(conn, prov, "harness", str(decision["id"]), "propose",
                after={"action": action_type, "tier": tier.tier, "status": decision["status"]})
     return {"decision_id": decision["id"], "status": decision["status"], "tier": tier.tier, "skipped": False}

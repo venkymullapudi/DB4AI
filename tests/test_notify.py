@@ -265,3 +265,79 @@ def test_routes_http(db_url, world, monkeypatch):
         assert client.put("/teams/eng/notify-routes/HOME", headers=h).status_code == 400
         assert client.delete("/teams/eng/notify-routes/DB4AI_WEBHOOK_ENG", headers=h).status_code == 200
         assert client.delete("/teams/eng/notify-routes/DB4AI_WEBHOOK_ENG", headers=h).status_code == 404
+
+
+# ------------------------------------------------------------------ auto_notice notices
+
+def merge_pair(w):
+    return item(w), item(w)
+
+
+def test_auto_notice_change_is_announced_with_revert_deadline(world, sent, monkeypatch):
+    w = world
+    monkeypatch.setenv("DB4AI_NOTIFY_WEBHOOKS", "https://hooks.example/slack")
+    monkeypatch.setenv("DB4AI_PUBLIC_URL", "https://db4ai.example")
+    a, b = merge_pair(w)
+    r = propose(w, "merge_items", {"keep": str(a), "drop": str(b)}, confidence=0.99)
+    assert (r["tier"], r["status"]) == ("auto_notice", "applied_auto")
+    assert len(notify_jobs(w)) == 1
+    p = propose(w, "archive_item", {"item_id": str(item(w))})["decision_id"]  # same burst: one message
+    drain(w)
+    assert len(sent) == 1
+    text = sent[0][1]["text"]
+    assert "1 harness decision waiting for review (1 × archive_item)" in text
+    assert "1 change applied automatically, revertible (1 × merge_items)" in text
+    assert "applied for db4ai-maintainer" in text and "revert by " in text
+    assert str(r["decision_id"]) in text and str(p) in text
+    assert "https://db4ai.example/harness?status=applied_auto" in text
+    assert "Nightingale" not in json.dumps(sent[0][1])
+    rows = w.conn.execute("select decision_id from notifications").fetchall()
+    assert {x["decision_id"] for x in rows} == {r["decision_id"], p}
+
+
+def test_plain_auto_is_not_announced(world, sent, monkeypatch):
+    w = world
+    monkeypatch.setenv("DB4AI_NOTIFY_WEBHOOKS", "https://hooks.example/slack")
+    propose(w, "add_tags", {"item_id": str(item(w)), "value": ["x"]}, confidence=1.0)
+    assert notify_jobs(w) == []
+
+
+def test_reverted_or_closed_window_is_not_announced(world, sent, monkeypatch):
+    w = world
+    monkeypatch.setenv("DB4AI_NOTIFY_WEBHOOKS", "https://hooks.example/slack")
+    a, b = merge_pair(w)
+    r1 = propose(w, "merge_items", {"keep": str(a), "drop": str(b)}, confidence=0.99)
+    harness.revert(w.conn, w.bob, r1["decision_id"], note="different companies")
+    c, d = merge_pair(w)
+    r2 = propose(w, "merge_items", {"keep": str(c), "drop": str(d)}, confidence=0.99)
+    w.conn.execute("update harness_decisions set revert_until = now() - interval '1 minute' where id=%s",
+                   (r2["decision_id"],))
+    drain(w)
+    assert sent == []
+
+
+def test_auto_notice_follows_team_routes(world, sent, monkeypatch):
+    w = world
+    monkeypatch.setenv("DB4AI_WEBHOOK_ENG", "https://hooks.example/eng")
+    notify.add_route(w.conn, w.root, w.eng, "DB4AI_WEBHOOK_ENG")
+    a, b = merge_pair(w)
+    r = propose(w, "merge_items", {"keep": str(a), "drop": str(b)}, confidence=0.99)
+    drain(w)
+    assert [u for u, _ in sent] == ["https://hooks.example/eng"]
+    assert str(r["decision_id"]) in sent[0][1]["text"]
+
+
+def test_message_caps_across_both_sections():
+    from datetime import datetime, timezone
+    now = datetime(2026, 12, 1, tzinfo=timezone.utc)
+    base = {"confidence": 0.99, "expires_at": None, "team": "eng", "proposed_by": "db4ai-maintainer"}
+    pend = [{**base, "id": f"p{i}", "action_type": "archive_item", "status": "pending"} for i in range(15)]
+    appl = [{**base, "id": f"a{i}", "action_type": "mark_stale", "status": "applied_auto", "revert_until": now}
+            for i in range(10)]
+    title, lines = notify.message(pend + appl, None)
+    assert "15 harness decisions" in title and "10 changes applied automatically" in title
+    assert sum(1 for ln in lines if ln.startswith("•")) == notify.MAX_LISTED
+    assert "…and 5 more" in lines and "revert by 2026-12-01" in "\n".join(lines)
+    title, lines = notify.message(appl[:1], None)
+    assert title == "DB4AI: 1 change applied automatically, revertible (1 × mark_stale)"
+    assert lines[-1].startswith("Revert:") and not any(ln.startswith("Review:") for ln in lines)
