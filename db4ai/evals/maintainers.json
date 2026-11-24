@@ -1,0 +1,423 @@
+{
+  "version": 1,
+  "description": "Synthetic, hand-labelled pairs for the dedup and staleness maintainers. 'old' is the existing item, 'new' the item being related; old_is_older defaults to true.",
+  "cases": [
+    {
+      "id": "dedup-exact-copy",
+      "task": "dedup",
+      "old": {
+        "type": "memory",
+        "title": "Acme Corp",
+        "body": "Acme Corp is our largest customer in the logistics vertical; renewal owner is Dana."
+      },
+      "new": {
+        "type": "memory",
+        "title": "Acme Corp.",
+        "body": "Acme Corp is our largest customer in the logistics vertical; renewal owner is Dana."
+      },
+      "expected": true,
+      "note": "same text, punctuation differs in the title"
+    },
+    {
+      "id": "dedup-whitespace",
+      "task": "dedup",
+      "old": {
+        "type": "document",
+        "title": "Onboarding checklist",
+        "body": "Day one: laptop, badge, Slack invite.\nDay two: shadow the on-call engineer.\nDay three: first pull request."
+      },
+      "new": {
+        "type": "document",
+        "title": "Onboarding checklist",
+        "body": "Day one: laptop, badge, Slack invite.\n\nDay two: shadow the on-call engineer.\n\nDay three: first pull request.\n"
+      },
+      "expected": true,
+      "note": "re-import with different blank lines"
+    },
+    {
+      "id": "dedup-reordered",
+      "task": "dedup",
+      "old": {
+        "type": "note",
+        "title": "Postgres upgrade notes",
+        "body": "Upgrade Postgres to 16 on the billing cluster. Take a base backup first. Run pg_upgrade with --link. Re-analyze all tables afterwards."
+      },
+      "new": {
+        "type": "note",
+        "title": "Postgres upgrade notes",
+        "body": "Take a base backup first. Upgrade Postgres to 16 on the billing cluster. Run pg_upgrade with --link. Re-analyze all tables afterwards."
+      },
+      "expected": true,
+      "note": "same sentences in another order"
+    },
+    {
+      "id": "dedup-trailing-signature",
+      "task": "dedup",
+      "old": {
+        "type": "memory",
+        "title": "Vendor contact for badges",
+        "body": "Our badge vendor is SecureCard; the account manager is Leo Park and orders take ten business days."
+      },
+      "new": {
+        "type": "memory",
+        "title": "Vendor contact for badges",
+        "body": "Our badge vendor is SecureCard; the account manager is Leo Park and orders take ten business days. Thanks!"
+      },
+      "expected": true,
+      "note": "copy with a trailing pleasantry"
+    },
+    {
+      "id": "dedup-case",
+      "task": "dedup",
+      "old": {
+        "type": "decision",
+        "title": "Use Terraform for infra",
+        "body": "We decided to manage all cloud infrastructure with Terraform and keep state in the shared S3 backend."
+      },
+      "new": {
+        "type": "decision",
+        "title": "use terraform for infra",
+        "body": "we decided to manage all cloud infrastructure with terraform and keep state in the shared s3 backend."
+      },
+      "expected": true,
+      "note": "same text lowercased"
+    },
+    {
+      "id": "dedup-paraphrase",
+      "task": "dedup",
+      "old": {
+        "type": "memory",
+        "title": "Office wifi",
+        "body": "The guest wifi network is called Visitors and the password rotates every Monday morning."
+      },
+      "new": {
+        "type": "memory",
+        "title": "Guest network",
+        "body": "Visitors is the name of the guest wifi; its password changes each Monday morning."
+      },
+      "expected": true,
+      "note": "paraphrase: hard for a bag-of-words embedder"
+    },
+    {
+      "id": "dedup-other-customer",
+      "task": "dedup",
+      "old": {
+        "type": "memory",
+        "title": "Acme Corp",
+        "body": "Acme Corp is our largest customer in the logistics vertical; renewal owner is Dana."
+      },
+      "new": {
+        "type": "memory",
+        "title": "Globex Corp",
+        "body": "Globex Corp is our largest customer in the retail vertical; renewal owner is Sam."
+      },
+      "expected": false,
+      "note": "same template, different customer"
+    },
+    {
+      "id": "dedup-other-type",
+      "task": "dedup",
+      "old": {
+        "type": "memory",
+        "title": "Acme Corp",
+        "body": "Acme Corp is our largest customer in the logistics vertical; renewal owner is Dana."
+      },
+      "new": {
+        "type": "document",
+        "title": "Acme Corp",
+        "body": "Acme Corp is our largest customer in the logistics vertical; renewal owner is Dana."
+      },
+      "expected": false,
+      "note": "same text but a different item type is never merged"
+    },
+    {
+      "id": "dedup-same-topic",
+      "task": "dedup",
+      "old": {
+        "type": "document",
+        "title": "Kubernetes migration plan",
+        "body": "Plan to migrate billing services to Kubernetes clusters in eu-west, starting with the invoicing API."
+      },
+      "new": {
+        "type": "document",
+        "title": "Kubernetes migration risks",
+        "body": "Risks of migrating billing services to Kubernetes: eu-west capacity, on-call training and cost."
+      },
+      "expected": false,
+      "note": "related, not duplicates"
+    },
+    {
+      "id": "dedup-weekly-standup",
+      "task": "dedup",
+      "old": {
+        "type": "meeting",
+        "title": "Platform standup 2026-03-02",
+        "body": "Attendees: Dana, Sam. Dana finished the cache rollout. Sam is blocked on the DNS change."
+      },
+      "new": {
+        "type": "meeting",
+        "title": "Platform standup 2026-03-09",
+        "body": "Attendees: Dana, Sam. Dana started the queue rollout. Sam finished the DNS change."
+      },
+      "expected": false,
+      "note": "recurring meeting, different week"
+    },
+    {
+      "id": "dedup-unrelated",
+      "task": "dedup",
+      "old": {
+        "type": "note",
+        "title": "Offsite lunch",
+        "body": "Lunch menu ideas for the offsite: tacos, salad, and a vegetarian option."
+      },
+      "new": {
+        "type": "note",
+        "title": "Quarterly security review",
+        "body": "The security review covers access logs, key rotation and the incident from February."
+      },
+      "expected": false,
+      "note": "unrelated"
+    },
+    {
+      "id": "dedup-changed-number",
+      "task": "dedup",
+      "old": {
+        "type": "memory",
+        "title": "Support SLA",
+        "body": "Enterprise support tickets get a first response within 4 hours."
+      },
+      "new": {
+        "type": "memory",
+        "title": "Support SLA",
+        "body": "Enterprise support tickets get a first response within 1 hour."
+      },
+      "expected": false,
+      "note": "same sentence, a changed fact: staleness, not a duplicate"
+    },
+    {
+      "id": "stale-date-moved",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Launch date",
+        "body": "The product launch date is 2026-03-01 for the Atlas release."
+      },
+      "new": {
+        "type": "meeting",
+        "title": "Atlas launch moved",
+        "body": "Atlas release product launch date moved to 2026-04-15 after review."
+      },
+      "expected": true,
+      "note": "changed date"
+    },
+    {
+      "id": "stale-number-changed",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Support SLA",
+        "body": "Enterprise support tickets get a first response within 4 hours."
+      },
+      "new": {
+        "type": "decision",
+        "title": "Faster enterprise SLA",
+        "body": "From May, enterprise support tickets get a first response within 1 hours."
+      },
+      "expected": true,
+      "note": "changed number"
+    },
+    {
+      "id": "stale-price",
+      "task": "staleness",
+      "old": {
+        "type": "decision",
+        "title": "Pro plan price",
+        "body": "The Pro plan costs 49 dollars per seat per month."
+      },
+      "new": {
+        "type": "meeting",
+        "title": "Pricing review",
+        "body": "We agreed the Pro plan now costs 59 dollars per seat per month, effective next quarter."
+      },
+      "expected": true,
+      "note": "changed price"
+    },
+    {
+      "id": "stale-owner",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Billing service owner",
+        "body": "Dana Lee owns the billing service and approves its releases."
+      },
+      "new": {
+        "type": "meeting",
+        "title": "Team changes",
+        "body": "Sam Ortiz now owns the billing service and approves its releases; Dana moved to the data team."
+      },
+      "expected": true,
+      "note": "changed owner, no numbers: needs a model"
+    },
+    {
+      "id": "stale-reversed-decision",
+      "task": "staleness",
+      "old": {
+        "type": "decision",
+        "title": "Datastore for events",
+        "body": "We decided to store product events in MongoDB."
+      },
+      "new": {
+        "type": "decision",
+        "title": "Events move to Postgres",
+        "body": "We reversed the earlier choice: product events will be stored in Postgres, not MongoDB."
+      },
+      "expected": true,
+      "note": "reversed decision, no numbers"
+    },
+    {
+      "id": "stale-headcount",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Platform team size",
+        "body": "The platform team has 6 engineers."
+      },
+      "new": {
+        "type": "note",
+        "title": "Platform team update",
+        "body": "After the reorg the platform team has 9 engineers."
+      },
+      "expected": true,
+      "note": "changed count"
+    },
+    {
+      "id": "stale-office-day",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Office day",
+        "body": "The whole company works from the office on Tuesdays."
+      },
+      "new": {
+        "type": "meeting",
+        "title": "All hands",
+        "body": "Starting next month the whole company works from the office on Thursdays instead of Tuesdays."
+      },
+      "expected": true,
+      "note": "changed weekday, no digits"
+    },
+    {
+      "id": "stale-adds-detail",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Launch date",
+        "body": "The product launch date is 2026-03-01 for the Atlas release."
+      },
+      "new": {
+        "type": "meeting",
+        "title": "Atlas launch prep",
+        "body": "The Atlas release launch on 2026-03-01 needs the press kit and the pricing page ready."
+      },
+      "expected": false,
+      "note": "same fact repeated with more detail"
+    },
+    {
+      "id": "stale-other-subject",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Atlas launch date",
+        "body": "The Atlas launch date is 2026-03-01."
+      },
+      "new": {
+        "type": "meeting",
+        "title": "Hermes launch date",
+        "body": "The Hermes launch date is 2026-06-10."
+      },
+      "expected": false,
+      "note": "different project, different date: not a contradiction"
+    },
+    {
+      "id": "stale-unrelated",
+      "task": "staleness",
+      "old": {
+        "type": "decision",
+        "title": "Use Terraform for infra",
+        "body": "We decided to manage all cloud infrastructure with Terraform."
+      },
+      "new": {
+        "type": "note",
+        "title": "Offsite lunch",
+        "body": "Lunch menu ideas for the offsite: tacos, salad, and a vegetarian option."
+      },
+      "expected": false,
+      "note": "unrelated"
+    },
+    {
+      "id": "stale-consistent-number",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Support SLA",
+        "body": "Enterprise support tickets get a first response within 4 hours."
+      },
+      "new": {
+        "type": "meeting",
+        "title": "Support review",
+        "body": "We met the 4 hours first response target for enterprise support tickets in 97 percent of cases."
+      },
+      "expected": false,
+      "note": "new number is a measurement, not a changed rule"
+    },
+    {
+      "id": "stale-older-new-item",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Pro plan price",
+        "body": "The Pro plan costs 59 dollars per seat per month."
+      },
+      "new": {
+        "type": "memory",
+        "title": "Pro plan price",
+        "body": "The Pro plan costs 49 dollars per seat per month."
+      },
+      "expected": false,
+      "note": "the 'new' item is a memory but the pair's old item is newer: see old_is_older",
+      "old_is_older": false
+    },
+    {
+      "id": "stale-wrong-old-type",
+      "task": "staleness",
+      "old": {
+        "type": "meeting",
+        "title": "Pricing call",
+        "body": "On the call the Pro plan was quoted at 49 dollars per seat per month."
+      },
+      "new": {
+        "type": "decision",
+        "title": "Pro plan price",
+        "body": "The Pro plan costs 59 dollars per seat per month."
+      },
+      "expected": false,
+      "note": "only memories and decisions are marked stale, not meetings"
+    },
+    {
+      "id": "stale-question",
+      "task": "staleness",
+      "old": {
+        "type": "memory",
+        "title": "Billing service owner",
+        "body": "Dana Lee owns the billing service and approves its releases."
+      },
+      "new": {
+        "type": "note",
+        "title": "Ownership question",
+        "body": "Should someone other than Dana Lee own the billing service next year? Open question for the planning meeting."
+      },
+      "expected": false,
+      "note": "a question, not a change"
+    }
+  ]
+}

@@ -73,6 +73,12 @@ Decisions reached by grilling (one question at a time). Each line is a locked de
 5. **schema** — recurring metadata shape across items of one type → propose promoting it to a table.
 6. **hygiene** — orphan blob GC, embedding rebuilds, expiring harness decisions.
 
+- **Evaluation** (`db4ai eval`): labelled (old, new) pairs for dedup and staleness, scored in memory with the pair
+  rules `relate` uses (`duplicate_pair`, `staleness_pair`; a duplicate pair is never checked for staleness) and the
+  configured LLM and embedder. Reports precision/recall/F1 per task and every miss; writes nothing and needs no
+  database. The built-in set (`db4ai/evals/maintainers.json`) is synthetic; `--cases` takes an owner's own file.
+  The tests pin the heuristic baseline as a floor.
+
 ### Risk tiers (policy-driven, fail closed)
 | tier | behaviour | default action types |
 |---|---|---|

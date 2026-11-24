@@ -61,4 +61,7 @@ right priority, with a one-line reason.
 - [x] Per-item ACLs beyond team scope. (v1 narrows within a team: named readers + owners + admins.)
 - [x] **Sharing an item with another team.** Grant read access to actors or teams outside the item's team. Why: split
       from per-item ACLs; v1 only narrows access, it never widens it.
-- [ ] Evaluation set for the maintainers (dedup, staleness precision) for use with the real Claude path.
+- [x] Evaluation set for the maintainers (dedup, staleness precision) for use with the real Claude path.
+- [ ] **Heuristic staleness precision.** The offline `contradiction` flags two different projects' dates as a
+      contradiction (`stale-other-subject` in `db4ai eval`); require the changed fact to share its subject. Raise the
+      floors in `tests/test_evals.py`. Why: found by the eval set; `auto_notice` stale marks land without review.

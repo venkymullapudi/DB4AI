@@ -71,6 +71,20 @@ def enrich(ctx: Context, payload: dict) -> Commit | None:
 
 # ---------------------------------------------------------------- 2-4. link, dedup, staleness
 
+STALE_MIN_SIMILARITY = 0.35
+
+
+def duplicate_pair(score: float, new_type: str, old_type: str, threshold: float) -> bool:
+    """`relate` proposes merging two items when they are this similar and of one type."""
+    return score >= threshold and new_type == old_type
+
+
+def staleness_pair(score: float, new_type: str, old_type: str, old_is_older: bool) -> bool:
+    """Whether `relate` asks the LLM if the new item supersedes the old one."""
+    return (score >= STALE_MIN_SIMILARITY and new_type in FACT_TYPES and old_type in ("memory", "decision")
+            and old_is_older)
+
+
 def relate(ctx: Context, payload: dict) -> Commit | None:
     item_id = UUID(payload["item_id"])
     cur = ctx.conn.execute("select * from items_current where id=%s", (item_id,)).fetchone()
@@ -91,7 +105,7 @@ def relate(ctx: Context, payload: dict) -> Commit | None:
     for n in neighbours:
         score = float(n["score"])
         evidence = [{"item": str(n["id"]), "title": n["title"], "similarity": round(score, 3)}]
-        if score >= s.dup_threshold and n["type"] == cur["type"]:
+        if duplicate_pair(score, cur["type"], n["type"], s.dup_threshold):
             older_first = n["updated_at"] <= cur["updated_at"]
             keep, drop = (n["id"], item_id) if older_first else (item_id, n["id"])
             proposals.append(("merge_items", {"keep": str(keep), "drop": str(drop), "confidence": round(score, 3)},
@@ -102,8 +116,7 @@ def relate(ctx: Context, payload: dict) -> Commit | None:
             proposals.append(("add_link", {"src": a, "dst": b, "kind": "related", "confidence": round(score, 3)},
                               f"related content (similarity {score:.2f})", score, evidence))
         # Staleness: a newer item that overlaps an older memory/decision may supersede it.
-        if (score >= 0.35 and cur["type"] in FACT_TYPES and n["type"] in ("memory", "decision")
-                and n["updated_at"] < cur["updated_at"]):
+        if staleness_pair(score, cur["type"], n["type"], n["updated_at"] < cur["updated_at"]):
             old = ctx.conn.execute("select title, body from items_current where id=%s", (n["id"],)).fetchone()
             verdict = ctx.llm.contradiction(f"{old['title']}\n{old['body']}", f"{cur['title']}\n{cur['body']}")
             if verdict.contradicts:

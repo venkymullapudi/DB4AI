@@ -118,6 +118,19 @@ expected embedding backend isn't the one in use. It also runs `scripts/smoke.sh`
 deployment, writes an item over HTTP, runs the maintainers and searches for it. Run it yourself with
 `scripts/smoke.sh` (needs Docker; it removes its containers and volumes afterwards).
 
+### Evaluating the maintainers
+
+`db4ai eval` scores the dedup and staleness maintainers on labelled pairs (precision, recall, F1 and every miss)
+with the same rules and LLM call `relate` uses. It needs no database and writes nothing. It uses the configured LLM
+and embedder, so with `ANTHROPIC_API_KEY` set it measures Claude (`--llm heuristic|claude` overrides; Claude calls bill
+your key). The built-in set is synthetic; pass `--cases my-pairs.json` (same format as `db4ai/evals/maintainers.json`)
+to score pairs from your own data. `--dup-threshold 0.9` tries a threshold, `--min-precision 0.9` exits 1 if a task
+scores below it.
+
+```bash
+db4ai eval --llm claude --min-precision 0.9
+```
+
 ## Configuration
 
 | env | default | |

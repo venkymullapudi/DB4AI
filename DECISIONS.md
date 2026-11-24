@@ -613,3 +613,28 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
 - **Surfaces:** `POST /items/{id}/shares` (`{"teams": [...], "actors": [...], "reason": ...}`), `service.propose_shares`.
   No MCP or CLI: changing access is a human request over HTTP, as for readers.
 - **Not owner-level:** no data deleted, additive migration (`016_item_shares.sql`), no new service.
+
+## 2026-11-24 — Evaluation set for the maintainers
+Grilled one question at a time; each answer is the recommended one, resolved from the code.
+- **Q: What is measured?** The two judgements that propose changes to other items: dedup (`merge_items`) and
+  staleness (`mark_stale`). Each eval case is a labelled pair (older item, newer item) and the metric is precision
+  (and recall, F1) of "would `relate` propose this for the pair?". Linking is left out: a wrong link is cheap.
+- **Q: Does the eval call the same code as `relate`?** Yes. The pair rules are pulled out of `relate` into
+  `maintainers.duplicate_pair` and `maintainers.staleness_pair`, and the eval embeds `title\nbody` exactly as `enrich`
+  does, then runs `llm.contradiction` with the same old/new texts. A pair that is a duplicate is not checked for
+  staleness, as in `relate`. So tuning against the eval tunes production.
+- **Q: Does it need Postgres?** No. It runs pairs in memory and writes nothing: an eval must never propose, merge or
+  mark anything in a real instance. That also makes it runnable anywhere the package is installed.
+- **Q: Where does the set live?** `db4ai/evals/maintainers.json`, shipped as package data: synthetic, hand-labelled
+  cases (no company data), each with an id, task, both items (type, title, body), the label and a one-line note on what
+  makes it hard (hard negatives: same template for another customer, a topic update with no changed fact). An owner can
+  pass their own file with `--cases` (same format), so labelled pairs from real data stay on their machine.
+- **Q: How is the real Claude path used?** `db4ai eval` uses the configured LLM and embedder (`get_llm`,
+  `get_embedder`), so with `ANTHROPIC_API_KEY` set it measures Claude; `--llm heuristic|claude` overrides. Claude calls
+  are made only when the owner runs the command; tests use the heuristic + hash embedder and never call the network.
+- **Q: Output and gating?** JSON: per task tp/fp/fn/tn, precision, recall, F1, the thresholds used, and each miss
+  (case id, expected, predicted, similarity, explanation). `--min-precision X` exits 1 if any task scores below X, so
+  it can gate a model or threshold change in CI. `--dup-threshold` overrides `DB4AI_DUP_THRESHOLD` to try a value.
+- **Q: Regression tests?** The set's shape is checked (unique ids, known tasks, both labels per task) and the heuristic
+  baseline is pinned as a floor, so a change that makes the offline maintainers worse fails the suite.
+- **Not owner-level:** read-only, no migration, no new service; Claude usage is opt-in and on the owner's own key.

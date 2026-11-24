@@ -30,6 +30,24 @@ def _actor(conn, name: str | None):
     return auth.maintainer_agent(conn)
 
 
+def _eval(a) -> None:
+    from . import evals
+    from .config import settings
+    from .llm import ClaudeLLM, HeuristicLLM
+
+    try:
+        cases = evals.load_cases(a.cases)
+    except (OSError, ValueError) as e:
+        sys.exit(f"bad eval file: {e}")
+    s = settings()
+    llm = {"heuristic": HeuristicLLM, "claude": lambda: ClaudeLLM(s.model)}.get(a.llm, get_llm)()
+    dup = a.dup_threshold if a.dup_threshold is not None else s.dup_threshold
+    r = evals.run(cases, llm, get_embedder(), dup)
+    _out(r)
+    if a.min_precision is not None and any(t["precision"] < a.min_precision for t in r["tasks"].values()):
+        sys.exit(1)
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="db4ai", description="Self-maintaining database for Human+AI data")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -71,6 +89,12 @@ def main(argv: list[str] | None = None) -> None:
     m = sub.add_parser("maintain", help="run maintainer jobs")
     m.add_argument("--once", action="store_true", help="drain the queue and exit")
 
+    ev = sub.add_parser("eval", help="score the dedup and staleness maintainers on a labelled set (no database)")
+    ev.add_argument("--cases", type=Path, help="your own eval file (default: the built-in synthetic set)")
+    ev.add_argument("--llm", choices=["heuristic", "claude"], help="override DB4AI_LLM (claude uses your API key)")
+    ev.add_argument("--dup-threshold", type=float, help="override DB4AI_DUP_THRESHOLD")
+    ev.add_argument("--min-precision", type=float, help="exit 1 if any task's precision is below this")
+
     sub.add_parser("serve", help="HTTP API + harness page").add_argument("--port", type=int, default=8000)
     sub.add_parser("mcp", help="MCP server over stdio (set DB4AI_TOKEN)")
 
@@ -80,6 +104,8 @@ def main(argv: list[str] | None = None) -> None:
     if a.cmd == "mcp":
         from .mcp_server import main as mcp_main
         return mcp_main()
+    if a.cmd == "eval":
+        return _eval(a)
     if a.cmd == "serve":
         import uvicorn
 
