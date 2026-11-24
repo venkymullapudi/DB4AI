@@ -214,3 +214,14 @@ enrichment and proposals with a heuristic fallback when no API key is set, plugg
   embed restricted items, but never link, merge or mark them stale against other items, and schema promotion leaves
   them out of `data.*` tables (readable by the whole team); a merge of items with different readers is refused.
   As-of reads use today's ACL.
+- **Sharing** (`item_shares`): an item can also be shared, read-only, with other teams (whoever is a member now) and
+  with actors outside its team; members of the item's team and the team itself are refused (use readers). A share is
+  an owner-approved grant, so it applies even to a restricted item. It changes only through a `set_item_shares`
+  decision (always `ask_first`, scope = the item's team, full new list, empty lists unshare, revertible, each request
+  its own decision); every change is in `change_log`. Enforced by `db4ai_item_shared(item, actor)`: every read scope is
+  "(own team and `db4ai_item_visible`) or shared", and `store.require_item(shared=True)` is passed only by get, history
+  and as-of reads. So a sharee reads the item, finds it in search and as-of search, gets it cited by `ask` (and its
+  carried history) and sees it as a link's other end; writes, access/share/erasure requests, the access listing,
+  erasure records and harness decisions stay with the team (403 otherwise). `get_item` shows `readers`/`shared_with`
+  only to the item's team. Maintainers skip shared items in `relate` and never pick them as neighbours, and
+  `merge_items` refuses items shared differently. As-of reads use today's shares.

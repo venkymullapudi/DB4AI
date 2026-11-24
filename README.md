@@ -27,6 +27,10 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   (`{"readers": [...] | null, "reason": ...}`; always reviewed by a team owner or admin). Owners and admins always
   read; everyone else in the team gets "not found" from reads, search, `ask`, links and harness listings.
   `GET /items/{id}/access` shows who can read it.
+- **Sharing across teams.** Ask to share an item, read-only, with other teams or outside actors with
+  `POST /items/{id}/shares` (`{"teams": [...], "actors": [...], "reason": ...}`; the full new list, empty lists
+  unshare; always reviewed by a team owner or admin). Sharees can read, search and `ask` over it; writes stay with
+  the item's team.
 - **Self-maintenance.** Background maintainers enrich items (summary, tags, entities, embeddings), link related
   items, merge near-duplicates, mark memories stale when newer items contradict them, propose turning
   recurring metadata into real tables, and clean up after themselves.

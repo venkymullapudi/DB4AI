@@ -67,6 +67,30 @@ def propose_access(conn: Conn, actor: Actor, item_id: str, readers: list[str] | 
         return jsonable(harness.propose(conn, actor, "set_item_access", payload, reason=reason, source=source))
 
 
+def team_ids(conn: Conn, names: list[str]) -> list[UUID]:
+    rows = conn.execute("select id, name from teams where name = any(%s)", (list(names),)).fetchall()
+    unknown = sorted(set(names) - {r["name"] for r in rows})
+    if unknown:
+        raise ValueError(f"unknown teams: {', '.join(unknown)}")
+    return [r["id"] for r in rows]
+
+
+def propose_shares(conn: Conn, actor: Actor, item_id: str, teams: list[str] | None, actors: list[str] | None,
+                   reason: str, source: str = "api") -> dict:
+    """Queue `set_item_shares` (always ask_first): the full list of other teams/actors that may read the item.
+    Empty lists unshare it. Only members of the item's team (with read access) can ask."""
+    iid = UUID(item_id)
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("a reason is required to share an item")
+    with transaction(conn):
+        store.require_item(conn, actor, iid)
+        t, a = store.check_shares(conn, iid, team_ids(conn, teams or []), actor_ids(conn, actors or []))
+        payload: dict[str, Any] = {"item_id": str(iid), "request": str(uuid4()),
+                                   "teams": [str(i) for i in t], "actors": [str(i) for i in a]}
+        return jsonable(harness.propose(conn, actor, "set_item_shares", payload, reason=reason, source=source))
+
+
 def sync_cursor(conn: Conn, actor: Actor, source: str, team: str | None = None) -> dict:
     return jsonable(connectors.get_cursor(conn, actor, source, resolve_team(conn, actor, team)))
 

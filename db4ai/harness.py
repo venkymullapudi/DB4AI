@@ -27,7 +27,7 @@ class HarnessError(Exception):
 # Always ask_first whatever the policies table says, and only admins may decide them.
 ADMIN_ONLY = frozenset({"erase_item", "redact_item"})
 # Always ask_first whatever the policies table says (team owners and admins decide).
-ALWAYS_ASK = ADMIN_ONLY | {"set_item_access"}
+ALWAYS_ASK = ADMIN_ONLY | {"set_item_access", "set_item_shares"}
 
 
 @dataclass(frozen=True)

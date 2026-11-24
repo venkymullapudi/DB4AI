@@ -40,6 +40,12 @@ class AccessIn(BaseModel):
     reason: str
 
 
+class SharesIn(BaseModel):
+    teams: list[str] = []   # team names outside the item's team; the full new list
+    actors: list[str] = []  # actor names outside the item's team; both empty unshares
+    reason: str
+
+
 class EraseIn(BaseModel):
     reason: str
 
@@ -165,6 +171,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.post("/items/{item_id}/access")
     def post_access(item_id: str, body: AccessIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
         return service.propose_access(c, a, item_id, body.readers, body.reason, source="http")
+
+    @app.post("/items/{item_id}/shares")
+    def post_shares(item_id: str, body: SharesIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):
+        return service.propose_shares(c, a, item_id, body.teams, body.actors, body.reason, source="http")
 
     @app.post("/items/{item_id}/erase")
     def post_erase(item_id: str, body: EraseIn, a: Actor = Depends(actor), c: Conn = Depends(conn)):

@@ -584,3 +584,32 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
 - **Q: As-of reads?** Today's ACL, like today's team scope.
 - **Q: Notifications?** Unchanged: messages carry ids, action types and counts, no content.
 - **Not owner-level:** no data deleted, additive migration (`015_item_acl.sql`), no new service.
+
+## 2026-11-24 — Sharing an item with another team
+Grilled one question at a time; each answer is the recommended one, resolved from the code.
+- **Q: What does a share grant?** Read only: get, history, as-of reads, search, as-of search, `ask` (and its carried
+  history), and the item as a link's other end. Writes (upsert by key, revert), access/share/erasure requests, the
+  access listing, erasure records and harness decisions stay with the item's team: a sharee is a reader, not a member.
+- **Q: Grant to whom?** Other teams (dynamic: whoever is a member now) and individual actors outside the item's team.
+  An actor who is already a member of the item's team is a 400 ("use readers"), and so is the item's own team, so
+  readers (narrowing inside the team) and shares (widening outside it) stay two separate mechanisms.
+- **Q: Storage?** `item_shares (item_id, teams uuid[], actors uuid[], set_by, decision_id, set_at)`, current state like
+  `item_acl`, every change in `change_log` (entity `item_shares`, ids only). No row = not shared. Holds no content.
+- **Q: How does it change?** Only via a `set_item_shares` decision: always `ask_first` (it widens access), scoped to the
+  item's team so its owners or admins decide, revertible, each request its own decision (request id). The request
+  carries the full new list; empty lists unshare. No "share at creation" in v1: widening should always be reviewed.
+- **Q: Restricted items?** A share is an explicit owner-approved grant, so it applies even when the item has readers
+  (a member of a grantee team reads it whatever `item_acl` says). Documented, not refused.
+- **Q: Enforcement?** SQL `db4ai_item_shared(item, actor)`; every read query's scope becomes
+  "(own team and `db4ai_item_visible`) or shared". `store.require_item` gains `shared=False` (fail closed): only the
+  read paths listed above pass `shared=True`. An outsider without a share still gets 403, as before.
+- **Q: Maintainers?** Shared items are skipped by `relate` and never picked as neighbours (like restricted items):
+  a link, merge alias or staleness explanation would carry another item's id or text to the sharees. `merge_items`
+  refuses items with different shares. Enrichment and embeddings still run. Schema promotion is unchanged (`data.*`
+  tables are the item's own team's).
+- **Q: What does a sharee see of the item's access?** `get_item` omits `readers` and `shared_with` for sharees (names
+  of the other team's members); members see both. `GET /items/{id}/access` adds `shared_with` (team only).
+- **Q: As-of reads?** Today's shares, like today's ACL.
+- **Surfaces:** `POST /items/{id}/shares` (`{"teams": [...], "actors": [...], "reason": ...}`), `service.propose_shares`.
+  No MCP or CLI: changing access is a human request over HTTP, as for readers.
+- **Not owner-level:** no data deleted, additive migration (`016_item_shares.sql`), no new service.

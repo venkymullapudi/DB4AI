@@ -111,27 +111,25 @@ def _search(conn: Conn, actor: Actor, q: str, *, embedder, limit: int, types: li
 
 def _carried_rows(conn: Conn, actor: Actor, ids: list[UUID], types: list[str] | None,
                   as_of: datetime | None) -> dict:
-    """Earlier-cited items re-read under search's rules: readable teams, active, the type filter. As of a time:
+    """Earlier-cited items re-read under search's rules: readable (team + ACL, or shared), active, the type filter. As of a time:
     the version then must be active, and items erased since are dropped (as in `store.search_as_of`)."""
     teams = None if actor.is_admin else list(actor.teams)
     vw = store.viewer(actor)
     if as_of is None:
         rows = conn.execute(
-            "select id, version, title, type, body from items_current where id = any(%s) and status = 'active'"
-            " and (%s::uuid[] is null or team_id = any(%s::uuid[]))"
-            " and (%s::text[] is null or type = any(%s::text[]))"
-            " and (%s::uuid is null or db4ai_item_visible(id, %s::uuid))",
-            (ids, teams, teams, types, types, vw, vw)).fetchall()
+            "select id, version, title, type, body from items_current where id = any(%(ids)s) and status = 'active'"
+            " and (%(types)s::text[] is null or type = any(%(types)s::text[]))"
+            " and " + store.readable("team_id", "id"),
+            {"ids": ids, "teams": teams, "types": types, "viewer": vw}).fetchall()
     else:
         rows = conn.execute(
             "select distinct on (v.item_id) v.item_id as id, v.version, v.title, i.type, v.body, v.status"
             " from item_versions v join items i on i.id = v.item_id join items_current c on c.id = i.id"
-            " where v.item_id = any(%s) and v.created_at <= %s and c.status <> 'erased'"
-            " and (%s::uuid[] is null or i.team_id = any(%s::uuid[]))"
-            " and (%s::text[] is null or i.type = any(%s::text[]))"
-            " and (%s::uuid is null or db4ai_item_visible(i.id, %s::uuid))"
+            " where v.item_id = any(%(ids)s) and v.created_at <= %(t)s and c.status <> 'erased'"
+            " and (%(types)s::text[] is null or i.type = any(%(types)s::text[]))"
+            " and " + store.readable("i.team_id", "i.id") +
             " order by v.item_id, v.version desc",
-            (ids, as_of, teams, teams, types, types, vw, vw)).fetchall()
+            {"ids": ids, "t": as_of, "teams": teams, "types": types, "viewer": vw}).fetchall()
         rows = [r for r in rows if r["status"] == "active"]
     return {r["id"]: r for r in rows}
 

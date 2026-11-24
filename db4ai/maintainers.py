@@ -76,8 +76,8 @@ def relate(ctx: Context, payload: dict) -> Commit | None:
     cur = ctx.conn.execute("select * from items_current where id=%s", (item_id,)).fetchone()
     if cur is None or cur["status"] != "active":
         return None
-    if store.item_readers(ctx.conn, item_id) is not None:
-        return None  # restricted: links, merges and staleness would carry its id or content to other items
+    if store.item_readers(ctx.conn, item_id) is not None or store.item_shares(ctx.conn, item_id) is not None:
+        return None  # restricted/shared: links, merges and staleness would carry ids or content across audiences
     emb = ctx.conn.execute("select embedding::text as e from item_embeddings where item_id=%s and model=%s",
                            (item_id, ctx.embedder.name)).fetchone()
     if emb is None:

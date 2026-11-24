@@ -177,7 +177,7 @@ def test_http_access_endpoints(world, db_url):
                                            "team": "eng", "readers": []}, headers=ha).json()["item_id"]
         assert client.get(f"/items/{item}", headers=hb).status_code == 404
         acc = client.get(f"/items/{item}/access", headers=ha).json()
-        assert acc == {"item_id": item, "restricted": True, "readers": ["alice"], "owners": ["alice"]}
+        assert acc == {"item_id": item, "restricted": True, "readers": ["alice"], "owners": ["alice"], "shared_with": None}
         d = client.post(f"/items/{item}/access", json={"readers": ["alice", "bob"], "reason": "share"},
                         headers=ha).json()
         assert d["status"] == "pending"

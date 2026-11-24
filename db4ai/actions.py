@@ -145,6 +145,8 @@ def _merge_apply(conn, prov, p):
     rk, rd = store.item_readers(conn, p["keep"]), store.item_readers(conn, p["drop"])
     if (set(rk) if rk is not None else None) != (set(rd) if rd is not None else None):
         raise ValueError("items with different readers can't be merged (the alias would carry the title across)")
+    if store.item_shares(conn, p["keep"]) != store.item_shares(conn, p["drop"]):
+        raise ValueError("items shared differently can't be merged (the alias would carry the title across)")
     aliases = sorted(set(keep["metadata"].get("aliases", [])) | {drop["title"]})
     store.new_version(conn, prov, p["keep"], metadata_patch={"aliases": aliases})
     store.new_version(conn, prov, p["drop"], status="merged", merged_into=UUID(p["keep"]))
@@ -263,6 +265,36 @@ def _item_access_revert(conn, prov, result):
     store.set_readers(conn, prov, UUID(result["item_id"]), None if before is None else [UUID(r) for r in before])
 
 
+# ---------------------------------------------------------------- sharing outside the team
+
+def _team_names(conn: Conn, ids) -> list[str]:
+    return [r["name"] for r in conn.execute("select name from teams where id = any(%s::uuid[]) order by name",
+                                            ([str(i) for i in ids],))]
+
+
+def _item_shares_diff(conn, p):
+    cur = _cur(conn, p["item_id"])
+    before = store.item_shares(conn, p["item_id"]) or {"teams": [], "actors": []}
+    return {"item": p["item_id"], "title": cur["title"],
+            "teams": [_team_names(conn, before["teams"]), _team_names(conn, p.get("teams", []))],
+            "actors": [_names(conn, before["actors"]), _names(conn, p.get("actors", []))]}
+
+
+def _item_shares_apply(conn, prov, p):
+    _cur(conn, p["item_id"])
+    before = store.item_shares(conn, p["item_id"])
+    store.set_shares(conn, prov, UUID(p["item_id"]), [UUID(t) for t in p.get("teams", [])],
+                     [UUID(a) for a in p.get("actors", [])])
+    return {"item_id": p["item_id"],
+            "before": None if before is None else {k: [str(x) for x in v] for k, v in before.items()}}
+
+
+def _item_shares_revert(conn, prov, result):
+    before = result.get("before") or {"teams": [], "actors": []}
+    store.set_shares(conn, prov, UUID(result["item_id"]), [UUID(t) for t in before["teams"]],
+                     [UUID(a) for a in before["actors"]])
+
+
 REGISTRY: dict[str, Action] = {
     "enrich": Action(_team_of_item("item_id"), _enrich_diff, _enrich_apply, _revert_versions),
     "add_tags": _meta_action("tags"),
@@ -278,6 +310,8 @@ REGISTRY: dict[str, Action] = {
     "archive_dataset": Action(_team_of_dataset, _archive_ds_diff, _archive_ds_apply, _archive_ds_revert),
     # Always ask_first (see harness.ALWAYS_ASK): it decides who can read an item.
     "set_item_access": Action(_team_of_item("item_id"), _item_access_diff, _item_access_apply, _item_access_revert),
+    # Always ask_first (see harness.ALWAYS_ASK): it widens who can read an item.
+    "set_item_shares": Action(_team_of_item("item_id"), _item_shares_diff, _item_shares_apply, _item_shares_revert),
     "change_access": Action(lambda c, p: UUID(p["team_id"]), lambda c, p: dict(p), _access_apply, None),
     # Redaction/erasure: always ask_first, admin-only (see harness.ADMIN_ONLY), never revertible.
     "erase_item": Action(_team_of_item("item_id"), erasure._erase_diff, erasure._erase_apply, None),

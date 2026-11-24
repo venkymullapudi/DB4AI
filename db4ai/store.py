@@ -40,6 +40,23 @@ def viewer(actor: Actor) -> UUID | None:
 
 
 VISIBLE = "(%(viewer)s::uuid is null or db4ai_item_visible({col}, %(viewer)s::uuid))"
+# Read scope of a search-like query: the actor's own teams under the item ACL, or an item shared with them.
+READABLE = ("(((%(teams)s::uuid[] is null or {team} = any(%(teams)s::uuid[])) and " + VISIBLE +
+            ") or (%(viewer)s::uuid is not null and db4ai_item_shared({col}, %(viewer)s::uuid)))")
+
+
+def readable(team: str, col: str) -> str:
+    return READABLE.format(team=team, col=col)
+
+
+def item_shared(conn: Conn, actor: Actor, item_id: UUID) -> bool:
+    return conn.execute("select db4ai_item_shared(%s, %s) as v", (item_id, actor.id)).fetchone()["v"]
+
+
+def item_readable(conn: Conn, actor: Actor, item_id: UUID, team_id: UUID) -> bool:
+    if actor.can_read(team_id) and item_visible(conn, actor, item_id):
+        return True
+    return not actor.is_admin and item_shared(conn, actor, item_id)
 
 
 def item_visible(conn: Conn, actor: Actor, item_id: UUID) -> bool:
@@ -48,14 +65,17 @@ def item_visible(conn: Conn, actor: Actor, item_id: UUID) -> bool:
     return conn.execute("select db4ai_item_visible(%s, %s) as v", (item_id, actor.id)).fetchone()["v"]
 
 
-def require_item(conn: Conn, actor: Actor, item_id: UUID, *, write: bool = False) -> UUID:
+def require_item(conn: Conn, actor: Actor, item_id: UUID, *, write: bool = False, shared: bool = False) -> UUID:
     """The item's team, after checking team access and the item's ACL.
 
     An item the ACL hides from a team member is "not found", exactly like an unknown id (no existence oracle).
+    `shared=True` (plain reads only) also admits actors the item is shared with; everything else is team-only.
     """
     row = conn.execute("select team_id from items where id = %s", (item_id,)).fetchone()
     if row is None:
         raise KeyError(f"item {item_id} not found")
+    if shared and not write and not actor.is_admin and item_shared(conn, actor, item_id):
+        return row["team_id"]
     (actor.require_write if write else actor.require_read)(row["team_id"])
     if not item_visible(conn, actor, item_id):
         raise KeyError(f"item {item_id} not found")
@@ -206,7 +226,7 @@ def new_version(conn: Conn, prov: Provenance, item_id: UUID, *, title: str | Non
 
 
 def get_item(conn: Conn, actor: Actor, item_id: UUID) -> dict:
-    require_item(conn, actor, item_id)
+    require_item(conn, actor, item_id, shared=True)
     cur = _current(conn, item_id)
     if cur is None:
         raise KeyError(f"item {item_id} not found")
@@ -216,11 +236,13 @@ def get_item(conn: Conn, actor: Actor, item_id: UUID) -> dict:
         " c.title as other_title, c.type as other_type"
         " from links l join items_current c on c.id = (case when l.src_item = %(id)s then l.dst_item else l.src_item end)"
         " where (l.src_item = %(id)s or l.dst_item = %(id)s)"
-        " and (%(teams)s::uuid[] is null or c.team_id = any(%(teams)s::uuid[])) and " + VISIBLE.format(col="c.id") +
+        " and " + readable("c.team_id", "c.id") +
         " order by l.confidence desc nulls last",
         {"id": item_id, "teams": teams, "viewer": viewer(actor)},
     ).fetchall()
-    cur["readers"] = _reader_names(conn, item_id)
+    if actor.can_read(cur["team_id"]):  # sharees don't see the other team's member names
+        cur["readers"] = _reader_names(conn, item_id)
+        cur["shared_with"] = _share_names(conn, item_id)
     return cur
 
 
@@ -238,11 +260,60 @@ def access(conn: Conn, actor: Actor, item_id: UUID) -> dict:
         "select a.name from team_members m join actors a on a.id = m.actor_id"
         " where m.team_id = %s and m.role = 'owner' order by a.name", (team_id,))]
     return {"item_id": item_id, "restricted": item_readers(conn, item_id) is not None,
-            "readers": _reader_names(conn, item_id), "owners": owners}
+            "readers": _reader_names(conn, item_id), "owners": owners, "shared_with": _share_names(conn, item_id)}
+
+
+def item_shares(conn: Conn, item_id: UUID) -> dict | None:
+    """{"teams": [...], "actors": [...]} the item is shared with, or None if it isn't shared."""
+    row = conn.execute("select teams, actors from item_shares where item_id = %s", (item_id,)).fetchone()
+    return None if row is None else {"teams": list(row["teams"]), "actors": list(row["actors"])}
+
+
+def _share_names(conn: Conn, item_id: UUID) -> dict | None:
+    sh = item_shares(conn, item_id)
+    if sh is None:
+        return None
+    return {"teams": [r["name"] for r in conn.execute("select name from teams where id = any(%s) order by name",
+                                                     (sh["teams"],))],
+            "actors": [r["name"] for r in conn.execute("select name from actors where id = any(%s) order by name",
+                                                      (sh["actors"],))]}
+
+
+def set_shares(conn: Conn, prov: Provenance, item_id: UUID, teams: list[UUID], actors: list[UUID]) -> None:
+    """Replace who outside the item's team may read it (both empty unshares). Callers check authority."""
+    before = item_shares(conn, item_id)
+    teams, actors = check_shares(conn, item_id, teams, actors)
+    if not teams and not actors:
+        conn.execute("delete from item_shares where item_id = %s", (item_id,))
+        after = None
+    else:
+        conn.execute(
+            "insert into item_shares (item_id, teams, actors, set_by, decision_id) values (%s, %s, %s, %s, %s)"
+            " on conflict (item_id) do update set teams = excluded.teams, actors = excluded.actors,"
+            " set_by = excluded.set_by, decision_id = excluded.decision_id, set_at = now()",
+            (item_id, teams, actors, prov.actor_id, prov.decision_id))
+        after = {"teams": [str(t) for t in teams], "actors": [str(a) for a in actors]}
+    log_change(conn, prov, "item_shares", str(item_id), "set" if after is not None else "unshare",
+               before=None if before is None else {k: [str(x) for x in v] for k, v in before.items()}, after=after)
+
+
+def check_shares(conn: Conn, item_id: UUID, teams: list[UUID], actors: list[UUID]) -> tuple[list, list]:
+    """Validate share grantees (outside the item's team, existing); returns them sorted and deduplicated."""
+    teams, actors = sorted(set(teams), key=str), sorted(set(actors), key=str)
+    own = conn.execute("select team_id from items where id = %s", (item_id,)).fetchone()["team_id"]
+    if own in teams:
+        raise ValueError("an item can't be shared with its own team")
+    if conn.execute("select count(*) as n from teams where id = any(%s)", (teams,)).fetchone()["n"] != len(teams):
+        raise ValueError("unknown teams")
+    if conn.execute("select count(*) as n from actors where id = any(%s)", (actors,)).fetchone()["n"] != len(actors):
+        raise ValueError("unknown actors")
+    if conn.execute("select 1 from team_members where team_id = %s and actor_id = any(%s)", (own, actors)).fetchone():
+        raise ValueError("actors in the item's team can't be shared with; use readers")
+    return teams, actors
 
 
 def history(conn: Conn, actor: Actor, item_id: UUID) -> list[dict]:
-    require_item(conn, actor, item_id)
+    require_item(conn, actor, item_id, shared=True)
     return conn.execute(
         "select v.version, v.title, v.status, v.source, v.reason, v.harness_decision_id, v.created_at,"
         " a.name as actor, a.kind as actor_kind"
@@ -396,9 +467,8 @@ def similar_chunks(conn: Conn, vec: list[float], model: str, *, team_ids: list[U
         " substr(c.body, k.start_char + 1, k.end_char - k.start_char) as chunk_text"
         " from cand k join items_current c on c.id = k.item_id and c.content_hash = k.content_hash"
         " where c.status = 'active'"
-        " and (%(teams)s::uuid[] is null or c.team_id = any(%(teams)s::uuid[]))"
         " and (%(types)s::text[] is null or c.type = any(%(types)s::text[]))"
-        " and " + VISIBLE.format(col="c.id") +
+        " and " + readable("c.team_id", "c.id") +
         " order by c.id, k.dist) best order by score desc limit %(limit)s"
     )
     return _nearest(conn, "item_chunks", "item_id, content_hash, chunk_no, start_char, end_char", finish,
@@ -415,6 +485,8 @@ def similar(conn: Conn, vec: list[float], model: str, *, team_ids: list[UUID] | 
         " and (%(exclude)s::uuid is null or c.id <> %(exclude)s::uuid)"
         " and (%(types)s::text[] is null or c.type = any(%(types)s::text[]))"
         " and " + VISIBLE.format(col="c.id") +
+        # Maintainers only: shared items are never neighbours (a link/merge/staleness would carry text to sharees).
+        " and not exists (select 1 from item_shares s where s.item_id = c.id)"
         " order by e.dist limit %(limit)s"
     )
     return _nearest(conn, "item_embeddings", "item_id", finish, vec, model,
@@ -435,9 +507,8 @@ def search(conn: Conn, actor: Actor, query: str, *, embedder=None, limit: int = 
         " from items_current c"
         " where to_tsvector('english', c.title || ' ' || c.body) @@ plainto_tsquery('english', %(q)s)"
         " and (%(inactive)s or c.status = 'active')"
-        " and (%(teams)s::uuid[] is null or c.team_id = any(%(teams)s::uuid[]))"
         " and (%(types)s::text[] is null or c.type = any(%(types)s::text[]))"
-        " and " + VISIBLE.format(col="c.id") +
+        " and " + readable("c.team_id", "c.id") +
         " order by score desc limit %(limit)s",
         {"q": query, "inactive": include_inactive, "teams": teams, "types": types, "limit": limit * 2,
          "viewer": viewer(actor)},
@@ -490,7 +561,7 @@ def _links_as_of(conn: Conn, actor: Actor, item_id: UUID, as_of: datetime) -> li
     out = []
     for r in rows:
         other = _version_as_of(conn, UUID(r["other"]), as_of)
-        if other is not None and actor.can_read(other["team_id"]) and item_visible(conn, actor, other["id"]):
+        if other is not None and item_readable(conn, actor, other["id"], other["team_id"]):
             out.append({"kind": r["kind"], "confidence": r["confidence"], "other": other["id"],
                         "other_title": other["title"], "other_type": other["type"]})
     return out
@@ -502,7 +573,7 @@ def get_item_as_of(conn: Conn, actor: Actor, item_id: UUID, as_of: datetime) -> 
     Unknown items and items created after `as_of` are both "not found". An erased item's old versions were
     scrubbed, so they read back as the tombstone text; `current_status` says so.
     """
-    require_item(conn, actor, item_id)
+    require_item(conn, actor, item_id, shared=True)
     row = _version_as_of(conn, item_id, as_of)
     if row is None:
         raise KeyError(f"item {item_id} did not exist at {as_of.isoformat()}")
@@ -528,9 +599,8 @@ def search_as_of(conn: Conn, actor: Actor, query: str, as_of: datetime, *, limit
         " from v join items i on i.id = v.item_id join items_current c on c.id = i.id"
         " where to_tsvector('english', v.title || ' ' || v.body) @@ plainto_tsquery('english', %(q)s)"
         " and c.status <> 'erased' and (%(inactive)s or v.status = 'active')"
-        " and (%(teams)s::uuid[] is null or i.team_id = any(%(teams)s::uuid[]))"
         " and (%(types)s::text[] is null or i.type = any(%(types)s::text[]))"
-        " and " + VISIBLE.format(col="i.id") +
+        " and " + readable("i.team_id", "i.id") +
         " order by score desc, i.id limit %(limit)s",
         {"t": as_of, "q": query, "inactive": include_inactive, "teams": teams, "types": types, "limit": limit,
          "viewer": viewer(actor)},
