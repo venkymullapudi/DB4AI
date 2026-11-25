@@ -71,6 +71,11 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   dataset table `data.<team>_<name>` (one row per database row, a `page_id` column plus one column per property;
   property changes and removed databases wait for approval in the harness); pages are team-wide, so share only what
   the team should see.
+  `db4ai sync slack --team eng` syncs the public and private channels your Slack bot (an internal app in your
+  workspace, bot token in `DB4AI_SLACK_TOKEN`) has been invited to, as one `conversation` item per channel per day
+  (threads under their parent message). The first sync, and each newly joined channel, backfills `--days` days
+  (default 30); later syncs re-read the last week. Private channels are restricted to their members (by actor email);
+  direct messages are never read.
   A file deleted (or trashed) in the source proposes archiving its item in the harness; nothing is archived until a
   team owner approves, and the proposal is withdrawn if the file comes back first.
   A batch can also carry `datasets` (`key`, `name`, `columns`, `rows`: a full snapshot of one table, e.g. a sheet tab)
@@ -162,6 +167,7 @@ db4ai eval --llm claude --min-precision 0.9
 | `DB4AI_NOTIFY_DELAY_SECONDS` | `60` | wait before sending, so a burst of proposals becomes one message |
 | `DB4AI_GDRIVE_TOKEN` | — | Google Drive OAuth access token (scope `drive.readonly`) for `db4ai sync gdrive` |
 | `DB4AI_NOTION_TOKEN` | — | Notion internal integration token for `db4ai sync notion` (syncs the pages and databases shared with the integration) |
+| `DB4AI_SLACK_TOKEN` | — | Slack bot token (`xoxb-…`, scopes `channels:read`, `groups:read`, `channels:history`, `groups:history`, `users:read`, `users:read.email`) for `db4ai sync slack` |
 | `DB4AI_GDRIVE_READERS` | off | `1` = restrict synced Drive files to the team members they are shared with (matched by actor email) |
 | `DB4AI_GDRIVE_FOLDERS` | — | comma-separated Drive folder / shared drive ids to limit `db4ai sync gdrive` to (default: everything the token can read) |
 | `DB4AI_GDRIVE_REFRESH_TOKEN`, `DB4AI_GDRIVE_CLIENT_ID`, `DB4AI_GDRIVE_CLIENT_SECRET` | — | instead of (or with) the access token: refresh it when it expires |

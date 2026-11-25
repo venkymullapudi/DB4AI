@@ -247,7 +247,23 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   or no longer shared drops out of the listing and is a deletion; an empty listing reports none (fail closed). The API
   doesn't expose page sharing, so records carry no readers (team-wide): the owner chooses what syncs by sharing pages
   with the integration.
-- More connectors (Miro, Slack) build on the same framework.
+- Built in: `slack` (`db4ai sync slack --team <t> [--days N]`): the public and private channels the bot whose token is
+  in `DB4AI_SLACK_TOKEN` is a member of (DB4AI never stores the token; DMs and group DMs are never read), as
+  `conversation` items, one per channel per UTC day (key `<channel id>/<YYYY-MM-DD>`, title `#<name> <day>`; metadata
+  `channel_id`, `channel_name`, `date`, `private`, `messages`, `participants`). Body: `[HH:MM] Name: text` lines,
+  mentions/channel refs by name, links as `label (url)`, files as `[file: name]`, join/leave/topic messages dropped;
+  each thread's replies are indented under its parent, in the parent's day (a deleted parent with replies shows as
+  `(message deleted)`). Each sync re-reads every channel from UTC midnight 7 days before the previous sync and re-sends
+  each day whole (edits, deletions and new replies in that window are seen; identical days write nothing); a channel
+  not in the cursor (first sync, newly joined) is backfilled `--days` days (default 30). Changes to older days, and
+  replies to parents older than the window, are not seen. Cursor = `v1:ts:<sync start>:ch:<channel ids synced>`;
+  batches go out at the incoming cursor and a final batch moves it. A private channel's days carry `reader_emails` of
+  its members (bots and deactivated users left out), a public channel's are `public`. Deletions: a previously synced day
+  inside a channel's re-read window that now has no messages, and every day of a channel the bot is no longer in; a
+  channel whose history returns `not_in_channel`/`channel_not_found`/`missing_scope` is skipped and reports none, and no
+  channels at all reports nothing. 429 and `ratelimited` are retried (Retry-After honoured); `invalid_auth` and other
+  errors stop the sync.
+- More connectors (Miro) build on the same framework.
 
 ## 7. Stack
 Python ≥3.11, FastAPI, psycopg 3 with plain SQL and a small SQL migration runner, pgvector,

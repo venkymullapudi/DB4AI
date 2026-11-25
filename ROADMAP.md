@@ -71,7 +71,12 @@ right priority, with a one-line reason.
       Why: the next source named in SPEC §6.
 - [x] **Notion databases as datasets.** Sync each database shared with the integration as a dataset (properties as
       columns, rows = its pages, values as text), with schema drift and deletions as for Sheets. Why: split from the
-      Notion connector; v1 syncs only page bodies, so a database's table data isn't queryable.
+      Notion connector; v1 syncs only page bodies, so a database's table data isn't queryable.- [x] **Slack connector** on the connector framework (bot token from env, channel messages as one `conversation` item
+      per channel per day, private channels restricted to their members). Why: the next source named in SPEC §6
+      once the roadmap was empty.
+- [ ] **Slack threads older than the window.** A reply to a parent older than the 7-day re-read window is never seen;
+      use each message's `latest_reply` (or the Events API) to re-render old days with new thread activity. Why: found
+      while building the Slack connector.
 
 ## Later
 

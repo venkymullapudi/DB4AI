@@ -814,3 +814,36 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
 - **Q: Dataset name?** The database title (renames later are ignored, as for Sheets); an untitled database is
   `notion <id>`. Name collisions get the framework's hash suffix.
 - **Not owner-level:** no migration, no data deleted (removals are ask_first), no new service or account.
+
+## 2026-11-25 — Slack connector
+The roadmap was fully ticked, so this run added the next source SPEC §6 names. Grilled one question at a time; each
+answer is the recommended one, resolved from the code and the Slack Web API.
+- **Q: What is one item?** One channel's messages on one UTC day (`<channel id>/<YYYY-MM-DD>`). One item per message
+  floods search and dedup with one-line fragments; one per channel is a document that grows forever and re-versions on
+  every message. A day reads like a meeting transcript, so `ask` can quote it.
+- **Q: Threads?** Replies are rendered indented under their parent, in the parent's day, read with
+  `conversations.replies` for every parent with `reply_count`. Replies also sent to the channel are skipped in history
+  so they aren't shown twice.
+- **Q: How does a sync find changes?** Slack has no cheap change feed for edits/deletions, so each sync re-reads a
+  window (from UTC midnight 7 days before the previous sync) and re-sends each day whole; unchanged days write
+  nothing (same content hash). Only tracking "messages newer than the cursor" would miss edits, deletions and new
+  replies. Cost: one `conversations.replies` call per thread in the window. Internal (single-workspace) apps keep the
+  normal history rate limits; the stricter 2025 limits apply to distributed non-Marketplace apps, which DB4AI isn't.
+- **Q: First sync and new channels?** Backfill `--days` (default 30), not the whole history: a big workspace's full
+  history is a long first sync, and the owner can raise it. The cursor lists the channel ids synced so far so a newly
+  joined channel is backfilled rather than getting only the last week. Ids are opaque, not content.
+- **Q: Which channels?** Those the bot is a member of (`users.conversations`, public + private, archived included).
+  Inviting the bot is the owner's explicit choice, as sharing is for Notion. DMs/group DMs are never read.
+- **Q: Access?** Fail closed: a private channel's days are restricted to its members' emails (`reader_emails`,
+  matched to `actors.email`; unmatched dropped, bots and deactivated users excluded), always on, unlike Drive's
+  opt-in, because a private channel landing team-wide is a leak. Public channels are sent `public`, so a channel made
+  public proposes lifting the restriction (ask_first).
+- **Q: Deletions?** Known days of a channel the bot left are deletions (ask_first `archive_item`), like an unshared
+  Notion page; so is a known day in the re-read window that now has no messages. A channel whose history can't be read
+  this run (`not_in_channel`, `channel_not_found`, `missing_scope`...) is skipped and its days aren't reported, and an
+  empty channel list reports nothing (fail closed). Days older than the window are never reported.
+- **Q: Rendering?** `[HH:MM] Name: text` (UTC), mentions by display name, `<url|label>` as `label (url)`, HTML
+  entities unescaped, attached files by name only (no download), join/leave/topic/pin messages dropped.
+- **Known gap (new roadmap item):** replies to parents older than the window aren't seen.
+- **Not owner-level:** no migration, no data deleted (removals are ask_first), no paid service; the Slack app is one the
+  owner creates in their own workspace when they choose to use the connector, as for Drive and Notion.
