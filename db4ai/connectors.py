@@ -46,6 +46,10 @@ class Record:
     # The same, as email addresses (matched to `actors.email`), for sources that only know emails (e.g. Drive).
     # The record says something about access when either list is set.
     reader_emails: list[str] | None = None
+    # The source says everybody can read it (e.g. a Drive file shared with anyone or the domain): a new item is
+    # team-wide, and an existing restricted item gets a proposal to lift its ACL (`set_item_access` with readers
+    # None, always ask_first). Can't be combined with readers or reader_emails.
+    public: bool = False
 
 
 @dataclass
@@ -136,21 +140,22 @@ def _team_readers(conn: Conn, team_id: UUID, names: list[str] | None,
 
 
 def _sync_readers(conn: Conn, actor: Actor, prov: Provenance, source: str, item_id: UUID,
-                  readers: list[UUID]) -> dict | None:
+                  readers: list[UUID] | None) -> dict | None:
     """The source's readers of an existing item differ from its ACL: propose `set_item_access` (always ask_first).
+    `readers` None means the source made it public: propose lifting the ACL (nothing to do if there is none).
 
     The syncing actor stays a reader so the next sync can still write the item. The payload names the ACL state it
     was computed from (`acl_changes`), so a re-sent batch is the same decision while a later, real change in the
     source is a new one. An older pending proposal from this source is withdrawn when the source moves again (or
     back to what the item already has)."""
-    want = sorted({*readers, actor.id}, key=str)
+    want = None if readers is None else sorted({*readers, actor.id}, key=str)
     have = store.item_readers(conn, item_id)
     acl_changes = conn.execute("select count(*) as n from change_log where entity='item_acl' and entity_id=%s",
                                (str(item_id),)).fetchone()["n"]
-    payload = {"item_id": str(item_id), "readers": [str(r) for r in want], "source_readers": source,
-               "acl_changes": acl_changes}
+    payload = {"item_id": str(item_id), "readers": None if want is None else [str(r) for r in want],
+               "source_readers": source, "acl_changes": acl_changes}
     fp = harness.fingerprint("set_item_access", payload)
-    if have is not None and set(have) == set(want):
+    if (have is None and want is None) or (have is not None and want is not None and set(have) == set(want)):
         fp = None  # nothing to change: withdraw anything pending from this source
     for r in conn.execute(
             "update harness_decisions set status='expired', decision_note=%s"
@@ -161,7 +166,8 @@ def _sync_readers(conn: Conn, actor: Actor, prov: Provenance, source: str, item_
     if fp is None:
         return None
     d = harness.propose(conn, actor, "set_item_access", payload,
-                        reason=f"readers changed in {source}", source=f"connector:{source}")
+                        reason=f"made public in {source}" if want is None else f"readers changed in {source}",
+                        source=f"connector:{source}")
     return {"decision_id": d["decision_id"], "status": d["status"]}
 
 
@@ -245,6 +251,8 @@ def apply_batch(conn: Conn, actor: Actor, source: str, team_id: UUID, records: l
     ds_keys = [d.key for d in dataset_records]
     if any(not k for k in keys + deleted + ds_keys + deleted_datasets):
         raise ValueError("every record needs a key")
+    if any(r.public and (r.readers is not None or r.reader_emails is not None) for r in records):
+        raise ValueError("a record can't be both public and restricted to readers")
     if set(keys) & set(deleted) or set(ds_keys) & set(deleted_datasets):
         raise ValueError("a key can't be both saved and deleted in one batch")
     if len(set(ds_keys)) != len(ds_keys):
@@ -263,9 +271,10 @@ def apply_batch(conn: Conn, actor: Actor, source: str, team_id: UUID, records: l
             raise CursorConflict(f"cursor for {source} moved (expected {expected_cursor!r}, found {row['cursor']!r})")
         for rec in records:
             ext = f"{source}:{rec.key}"
-            readers, dropped = ((None, []) if rec.readers is None and rec.reader_emails is None
+            says = rec.public or rec.readers is not None or rec.reader_emails is not None
+            readers, dropped = ((None, []) if rec.public or not says
                                 else _team_readers(conn, team_id, rec.readers, rec.reader_emails))
-            exists = readers is not None and conn.execute(
+            exists = says and conn.execute(
                 "select 1 from items where team_id=%s and type=%s and external_key=%s",
                 (team_id, rec.type, ext)).fetchone() is not None
             r = store.save_item(conn, actor, prov, team_id=team_id, type=rec.type, title=rec.title, body=rec.body,

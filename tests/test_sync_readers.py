@@ -101,3 +101,41 @@ def test_http_sync_with_readers(world, db_url):
         item = r.json()["items"][0]["item_id"]
         bob = {"Authorization": f"Bearer {w.tokens['bob']}"}
         assert client.get(f"/items/{item}", headers=bob).status_code == 404
+
+
+def test_public_record_proposes_lifting_a_restriction(world):
+    w = world
+    add_dave(w)
+    item = sync(w, [rec(["dave"])], "c1", None)["items"][0]["item_id"]
+
+    out = sync(w, [Record(key="f1", type="document", title="Reorg plan", body="Confidential reorg", public=True)],
+               "c2", "c1")
+    d = out["items"][0]["access_decision"]
+    assert d["status"] == "pending" and out["access_proposed"] == 1
+    row = w.conn.execute("select payload, reason from harness_decisions where id=%s", (d["decision_id"],)).fetchone()
+    assert row["payload"]["readers"] is None and "public" in row["reason"]
+    with pytest.raises(KeyError):                                         # still restricted until approved
+        store.get_item(w.conn, w.bob, item)
+    # Re-sent: the same decision. Restricted again in the source before approval: the lift is withdrawn.
+    pub = Record(key="f1", type="document", title="Reorg plan", body="Confidential reorg", public=True)
+    assert sync(w, [pub], "c3", "c2")["items"][0]["access_decision"]["decision_id"] == d["decision_id"]
+    assert "access_decision" not in sync(w, [rec(["dave"])], "c4", "c3")["items"][0]
+    assert w.conn.execute("select status from harness_decisions where id=%s",
+                          (d["decision_id"],)).fetchone()["status"] == "expired"
+
+    # Public again: a new proposal; approving it lifts the ACL, and later public syncs propose nothing.
+    again = sync(w, [pub], "c5", "c4")["items"][0]["access_decision"]
+    harness.decide(w.conn, w.alice, again["decision_id"], approve=True)
+    assert store.item_readers(w.conn, item) is None
+    assert store.get_item(w.conn, w.bob, item)["id"] == item
+    assert sync(w, [pub], "c6", "c5")["access_proposed"] == 0
+
+
+def test_public_new_item_is_team_wide_and_public_with_readers_is_rejected(world):
+    w = world
+    out = sync(w, [Record(key="f9", type="document", title="Handbook", body="Company handbook", public=True)],
+               "c1", None)
+    assert store.item_readers(w.conn, out["items"][0]["item_id"]) is None and out["access_proposed"] == 0
+    with pytest.raises(ValueError, match="public"):
+        sync(w, [Record(key="f8", type="document", title="X", body="x", public=True, readers=["bob"])], "c2", "c1")
+    assert connectors.get_cursor(w.conn, w.alice, "drive", w.eng)["cursor"] == "c1"   # nothing written

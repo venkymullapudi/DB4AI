@@ -727,3 +727,24 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
 - **Not owner-level:** additive nullable column, opt-in behaviour, no data deleted, no new service.
 - **Found on the way:** `connectors.run` (what `db4ai sync` prints) didn't sum `access_proposed` across batches, so a
   sync that proposed access changes reported none. It now does.
+
+## 2026-11-25 — Lift a synced restriction when the source goes public
+Grilled one question at a time; each answer is the recommended one, resolved from the code.
+- **Q: What is the "public" signal?** A separate `Record.public` flag (and `public` on `POST /sync` items), not an
+  empty or magic readers list: `readers=[]` already means "owners and admins only", and None must keep meaning "the
+  source says nothing" so a connector that can't see permissions never opens anything up.
+- **Q: `public` together with readers?** Contradictory, so the batch is rejected (ValueError / 400) before anything is
+  written. Silently picking one would either widen or narrow access on a connector bug.
+- **Q: What does public do?** New item: team-wide (as before). Existing restricted item: propose `set_item_access`
+  with readers None, always `ask_first`, reason "made public in <source>". Existing team-wide item: nothing, and any
+  pending proposal from that source is withdrawn. It reuses `_sync_readers`, so the `source_readers` / `acl_changes`
+  idempotence holds: a re-sent batch is the same decision, a rejected lift isn't re-proposed, and restricting the
+  file again in the source before approval withdraws the lift (`expired`).
+- **Q: Does public touch item shares?** No. "Public" in the source widens to the item's own team; sharing with other
+  teams stays a separate owner request.
+- **Q: Drive `domain` permissions for another company's domain?** Still treated as public, as before (the connector
+  doesn't know the company's domain). Safe because a lift is always ask_first and the reviewer sees the diff.
+- **Q: Files that were already public before this release?** Their cursor carries the old `acl:` tag; the tag is now
+  `acl2:`, so the next sync re-lists once (content is idempotent) and proposes lifts for restricted files that are
+  public in Drive. An `acl:` cursor with readers turned off also re-lists once instead of erroring.
+- **Not owner-level:** no migration, no data deleted, every lift waits for an owner's approval.

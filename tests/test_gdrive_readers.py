@@ -171,3 +171,42 @@ def test_actor_email_mapping(conn, db_url, monkeypatch, tmp_path, capsys):
     main(["email", "frank", "--clear"])
     capsys.readouterr()
     assert conn.execute("select email from actors where name='frank'").fetchone()["email"] is None
+
+
+def test_file_made_public_in_drive_proposes_lifting(people):
+    w = people
+    fake = PermDrive()
+    fake.add("d1", "Reorg", GDOC, "Confidential reorg plan")
+    fake.share("d1", ("user", "dave@example.com"), change=False)
+    connectors.run(w.conn, w.alice, "gdrive", w.eng, drive(fake, readers=True))
+    iid = items(w)["d1"]
+    assert names(w, iid) == ["alice", "dave"]
+
+    fake.share("d1", ("user", "dave@example.com"), ("anyone", None))
+    r = connectors.run(w.conn, w.alice, "gdrive", w.eng, drive(fake, readers=True))
+    assert r["access_proposed"] == 1
+    d = w.conn.execute("select * from harness_decisions where action_type='set_item_access'"
+                       " and status='pending'").fetchone()
+    assert d["payload"]["readers"] is None and names(w, iid) == ["alice", "dave"]
+    harness.decide(w.conn, w.alice, d["id"], approve=True)
+    assert names(w, iid) is None
+
+
+def test_old_acl_cursor_relists_and_proposes_lifts(people):
+    w = people
+    fake = PermDrive()
+    fake.add("d1", "Handbook", GDOC, "Company handbook")
+    fake.share("d1", ("user", "dave@example.com"), change=False)
+    first = connectors.run(w.conn, w.alice, "gdrive", w.eng, drive(fake, readers=True))
+    iid = items(w)["d1"]
+    # Simulate a cursor written before public files were sent (tag "acl:"), with the file already public.
+    old = first["cursor"].replace(T + ACL_TAG, T + "acl:", 1)
+    w.conn.execute("update sync_cursors set cursor=%s where source='gdrive'", (old,))
+    fake.share("d1", ("domain", None), change=False)
+    r = connectors.run(w.conn, w.alice, "gdrive", w.eng, drive(fake, readers=True))
+    assert r["cursor"].startswith(T + ACL_TAG) and r["access_proposed"] == 1 and r["changed"] == 0
+    assert names(w, iid) == ["alice", "dave"]
+    # Turning readers off with an old-tag cursor re-lists too (no "not a Drive cursor" error).
+    w.conn.execute("update sync_cursors set cursor=%s where source='gdrive'", (old,))
+    off = connectors.run(w.conn, w.alice, "gdrive", w.eng, drive(fake, readers=False))
+    assert "acl" not in off["cursor"]

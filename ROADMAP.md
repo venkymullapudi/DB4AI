@@ -64,7 +64,7 @@ right priority, with a one-line reason.
 - [x] **Drive permissions as readers.** In `gdrive`, map each file's permissions (users, not "anyone"/domain links)
       to actor names and send them as `readers`. Needs an actor ↔ email mapping (actors only have a name today). Why:
       split from "Readers on synced records"; the framework now accepts readers but no built-in connector sends them.
-- [ ] **Lift a synced restriction when the source goes public.** A record needs an explicit "public" signal (e.g. a
+- [x] **Lift a synced restriction when the source goes public.** A record needs an explicit "public" signal (e.g. a
       Drive file shared with anyone or the domain) that proposes lifting the item's ACL. Why: split from "Drive
       permissions as readers"; None never changes access, so a file opened up in Drive stays restricted in DB4AI.
 - [ ] **Notion connector** on the connector framework (token from env, pages as documents, databases as datasets).

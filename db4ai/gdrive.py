@@ -23,9 +23,11 @@ row = header) and sent as a `DatasetRecord` keyed `<file id>#<sheet id>`, in its
 started from. Tabs that disappear, and every tab of a removed spreadsheet, are reported in `deleted_datasets`.
 
 With readers on (`readers=True` or `DB4AI_GDRIVE_READERS=1`), each file's `user` permissions are sent as the record's
-`reader_emails` (matched to `actors.email` by the framework). A file shared with `anyone` or a whole `domain` sends
-None (the team can read it); `group` permissions are ignored (DB4AI can't expand groups), which only narrows. Files
-whose permissions Drive won't list send None, so access stays as it is. The cursor carries `acl:` while this is on.
+`reader_emails` (matched to `actors.email` by the framework). A file shared with `anyone` or a whole `domain` is sent
+as `public` (a new item is team-wide; an existing restricted one gets an ask_first proposal to lift its ACL); `group`
+permissions are ignored (DB4AI can't expand groups), which only narrows. Files whose permissions Drive won't list send
+neither, so access stays as it is. The cursor carries `acl2:` while this is on (`acl:` was the tag before public
+files were sent, so upgrading re-lists once and proposes lifts for files that are already public).
 """
 
 from __future__ import annotations
@@ -63,7 +65,9 @@ TYPES_TAG = "types:" + hashlib.sha256(",".join(sorted(SYNCED_TYPES)).encode()).h
 MAX_BYTES = 10 * 1024 * 1024  # Drive's own export limit; larger text files are skipped
 FILE_FIELDS = "id,name,mimeType,modifiedTime,webViewLink,trashed,size,parents"
 PERM_FIELDS = "permissions(type,role,emailAddress,deleted)"
-ACL_TAG = "acl:"  # cursor prefix while readers are synced, so turning them on (or off) re-lists once
+ACL_TAG = "acl2:"  # cursor prefix while readers are synced, so turning them on (or off) re-lists once
+OLD_ACL_TAGS = ("acl:", ACL_TAG)  # any readers tag a cursor may carry (acl: = before public files were sent)
+PUBLIC = "public"  # `_reader_emails` result for a file anyone or a whole domain can read
 _ALL_DRIVES = {"supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
 
 
@@ -292,8 +296,10 @@ class GoogleDrive:
             meta = {"mime_type": f["mimeType"], "modified_time": f.get("modifiedTime")}
             if f.get("webViewLink"):
                 meta["web_view_link"] = f["webViewLink"]
+            emails = self._reader_emails(f) if self.readers else None
+            public = emails == PUBLIC
             out.append(Record(key=f["id"], type="document", title=f.get("name") or f["id"], body=body,
-                              metadata=meta, reader_emails=self._reader_emails(f) if self.readers else None))
+                              metadata=meta, reader_emails=None if public else emails, public=public))
         return out
 
     def _permissions(self, f: dict) -> list[dict] | None:
@@ -318,8 +324,8 @@ class GoogleDrive:
             if not page:
                 return out
 
-    def _reader_emails(self, f: dict) -> list[str] | None:
-        """Emails of the users a file is shared with; None when anyone or a whole domain can read it, or when the
+    def _reader_emails(self, f: dict) -> list[str] | str | None:
+        """Emails of the users a file is shared with; PUBLIC when anyone or a whole domain can read it; None when the
         permissions can't be read (the source says nothing)."""
         perms = self._permissions(f)
         if perms is None:
@@ -329,7 +335,7 @@ class GoogleDrive:
             if p.get("deleted"):
                 continue
             if p.get("type") in ("anyone", "domain"):
-                return None
+                return PUBLIC
             if p.get("type") == "user" and p.get("emailAddress"):
                 emails.add(p["emailAddress"].strip().lower())
         return sorted(emails)
@@ -420,7 +426,7 @@ class GoogleDrive:
 
     def fetch(self, cursor: str | None) -> Iterator[Batch]:
         tag = self.cursor_tag
-        if cursor and (not cursor.startswith(tag) or not self.readers and cursor[len(tag):].startswith(ACL_TAG)):
+        if cursor and (not cursor.startswith(tag) or not self.readers and cursor[len(tag):].startswith(OLD_ACL_TAGS)):
             if not cursor.startswith(("scope:", "types:", "list:", "changes:")):
                 raise DriveError(f"not a Google Drive cursor: {cursor!r}")
             log.info("Drive folder scope, synced file types or readers setting changed: starting a full listing")

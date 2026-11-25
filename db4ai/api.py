@@ -71,6 +71,7 @@ class SyncItemIn(BaseModel):
     metadata: dict = {}
     readers: list[str] | None = None  # actor names who can read it in the source; None = the source says nothing
     reader_emails: list[str] | None = None  # the same as emails, matched to actors' emails
+    public: bool = False  # everybody can read it in the source: proposes lifting an existing restriction
 
 
 class SyncDatasetIn(BaseModel):

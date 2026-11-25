@@ -100,7 +100,7 @@ def sync_batch(conn: Conn, actor: Actor, source: str, *, items: list[dict], curs
                datasets: list[dict] | None = None, deleted_datasets: list[str] | None = None) -> dict:
     records = [connectors.Record(key=i["key"], type=i["type"], title=i["title"], body=i.get("body", ""),
                                  metadata=i.get("metadata") or {}, readers=i.get("readers"),
-                                 reader_emails=i.get("reader_emails")) for i in items]
+                                 reader_emails=i.get("reader_emails"), public=bool(i.get("public"))) for i in items]
     snapshots = [connectors.DatasetRecord(key=d["key"], name=d["name"], columns=d["columns"], rows=d.get("rows") or [])
                  for d in datasets or []]
     return jsonable(connectors.apply_batch(conn, actor, source, resolve_team(conn, actor, team), records,

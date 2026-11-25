@@ -164,7 +164,11 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   is the same decision, a rejected change isn't re-proposed, and a later real change is a new decision). A newer reader
   set from the source withdraws (status `expired`) a pending one from that source, as does a set that matches the ACL.
   A record may give `reader_emails` instead of (or as well as) names, matched to `actors.email`; unmatched emails are
-  dropped like unknown names. Either list being set means the source says something.
+  dropped like unknown names. Either list being set means the source says something. A record may instead say
+  `public` (everybody can read it in the source; combining it with either list is rejected and nothing is written):
+  a new item is team-wide, and an existing restricted item gets a `set_item_access` proposal with readers None
+  (lifting the ACL; same `source_readers`/`acl_changes` idempotence and withdrawal; item shares are untouched).
+  Only an explicit `public` lifts: a record with no readers says nothing and never changes access.
 - **Source deletions**: a batch can also carry `deleted` keys (counted toward the 500). Each one whose item in the team
   is active or stale gets an `archive_item` proposal in the same transaction (source `connector:<source>`, payload
   item id, `for_version` and `source_deleted`; no key or title), tiered by `policies` (`ask_first` by default). Unknown,
@@ -215,10 +219,12 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   their own batch(es) at the cursor its page started from, before the page's batch. A tab removed from a spreadsheet,
   and every tab of a removed/trashed/out-of-scope spreadsheet, is reported in `deleted_datasets` (→ `archive_dataset`).
   **Readers** (`--readers` or `DB4AI_GDRIVE_READERS=1`; off by default): each file's `user` permissions (any role,
-  not `deleted`) are sent as `reader_emails`. A file shared with `anyone` or a `domain` sends None (team-wide); `group`
+  not `deleted`) are sent as `reader_emails`. A file shared with `anyone` or a `domain` is sent as `public` (a new item
+  is team-wide; an already-restricted one gets a proposal to lift its ACL); `group`
   permissions are ignored (groups aren't expanded), which only narrows. Permissions missing from the listing
-  (shared-drive items, files the account can't share) are read with `permissions.list`; a 403/404 there sends None
-  (access left as is). While on, the cursor carries `acl:` after the types tag, so turning it on or off re-lists once.
+  (shared-drive items, files the account can't share) are read with `permissions.list`; a 403/404 there sends neither
+  (access left as is). While on, the cursor carries `acl2:` after the types tag, so turning it on or off re-lists once
+  (an older `acl:` cursor re-lists once too, so files already public get their lift proposals).
   Sheets carry no readers (datasets have no ACL).
 - More connectors (Notion, Miro, Slack) build on the same framework.
 

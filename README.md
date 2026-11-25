@@ -54,7 +54,8 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   cursor commit together, and a stale `expected_cursor` is a 409, so no batch is skipped or applied twice.
   An item can carry `readers` (actor names who can read it in the source): a new item is created restricted to them
   (plus the syncer); names outside the team are dropped. When the source's readers change later, the sync proposes
-  `set_item_access` for an owner to approve.
+  `set_item_access` for an owner to approve. `public: true` says everybody can read it in the source, which proposes
+  lifting an existing restriction.
   Sources that only know emails send `reader_emails`, matched to actors' emails (`db4ai user NAME --email ...` or
   `db4ai email NAME ADDRESS`).
   `db4ai sync gdrive --team eng` syncs Google Docs (exported as text), text/Markdown files, and PDFs and .docx files (text extracted) from Google Drive
@@ -63,7 +64,8 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   `--folder <id>` (repeatable, or `DB4AI_GDRIVE_FOLDERS`) limits it to those folders or shared drives and everything
   below them; files that leave the scope count as deleted.
   `--readers` (or `DB4AI_GDRIVE_READERS=1`) restricts each synced file to the team members it is shared with in Drive
-  (by email; files shared with anyone or your whole domain stay team-wide, groups are not expanded).
+  (by email; files shared with anyone or your whole domain stay team-wide, groups are not expanded). When a restricted
+  file is later shared with anyone or the domain, the sync proposes lifting the restriction for an owner to approve.
   A file deleted (or trashed) in the source proposes archiving its item in the harness; nothing is archived until a
   team owner approves, and the proposal is withdrawn if the file comes back first.
   A batch can also carry `datasets` (`key`, `name`, `columns`, `rows`: a full snapshot of one table, e.g. a sheet tab)
