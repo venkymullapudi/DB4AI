@@ -12,7 +12,10 @@ One item per message would flood search with fragments; one per channel would be
 Each sync re-reads a window of every channel and re-sends each day in it whole, so edits, deleted messages and new
 thread replies in that window are picked up (identical days add no version): a channel already synced is re-read from
 the UTC midnight `LOOKBACK_DAYS` before the previous sync; a channel the bot newly joined (or every channel on the
-first sync) is backfilled `days` days (default 30). Changes to days older than the window are not seen.
+first sync) is backfilled `days` days (default 30). Thread replies are the exception: a known channel's history is
+also listed back `thread_days` days (default 30), and an older day is re-read whole when one of its threads has a reply
+(`latest_reply`) inside the window, so a late reply to an old parent lands in the parent's day. Other changes to days
+older than the window (edits, deletions) are not seen.
 
 Cursor (opaque to the framework, never holds content): `v1:ts:<unix time the sync started>:ch:<channel ids>`, the ids
 of the channels synced so far (so a newly joined channel is backfilled). Batches go out at the incoming cursor (a crash
@@ -81,12 +84,15 @@ def _midnight(ts: float) -> float:
 class Slack:
     def __init__(self, token: str | None = None, http: httpx.Client | None = None, days: int = 30,
                  batch_size: int = 100, retries: int = 4, sleep: Callable[[float], None] = time.sleep,
-                 now: Callable[[], float] = time.time):
+                 now: Callable[[], float] = time.time, thread_days: int = 30):
         self.token = token or os.environ.get("DB4AI_SLACK_TOKEN") or None
         if not self.token:
             raise SlackError("set DB4AI_SLACK_TOKEN to a Slack bot token")
         if days < 1:
             raise ValueError("days must be at least 1")
+        if thread_days < 0:
+            raise ValueError("thread_days must not be negative")
+        self.thread_days = thread_days
         self.http = http or httpx.Client(timeout=60)
         self.days, self.batch_size, self.retries, self.sleep, self.now = days, batch_size, retries, sleep, now
         self._channels: list[dict] | None = None
@@ -210,9 +216,18 @@ class Slack:
         return sorted((m for m in self._paged("conversations.replies", "messages", channel=channel, ts=ts)
                        if m["ts"] != ts), key=lambda m: float(m["ts"]))
 
-    def _render_days(self, channel: dict, oldest: float) -> dict[str, tuple[list[str], set[str], int]]:
+    def _render_days(self, channel: dict, oldest: float,
+                     threads_oldest: float | None = None) -> dict[str, tuple[list[str], set[str], int]]:
+        """Render every day from `oldest` on; from `threads_oldest` (earlier) on, only the days holding a thread whose
+        latest reply is at or after `oldest` (a late reply to an old parent), each re-read whole."""
+        start = oldest if threads_oldest is None else min(oldest, threads_oldest)
+        history = self._history(channel["id"], start)
+        if start < oldest:
+            active = {_day(float(m["ts"])) for m in history if float(m["ts"]) < oldest and m.get("reply_count")
+                      and float(m.get("latest_reply") or 0) >= oldest}
+            history = [m for m in history if float(m["ts"]) >= oldest or _day(float(m["ts"])) in active]
         days: dict[str, tuple[list[str], set[str], int]] = {}
-        for m in self._history(channel["id"], oldest):
+        for m in history:
             replies = self._replies(channel["id"], m["ts"]) if m.get("reply_count") else []
             shown = [x for x in [m, *replies] if self._line(x) is not None]
             if not shown:
@@ -236,9 +251,9 @@ class Slack:
                 emails.append(e.lower())
         return {"reader_emails": sorted(set(emails))}
 
-    def records(self, channel: dict, oldest: float) -> list[Record]:
-        days = self._render_days(channel, oldest)
-        self._days[channel["id"]] = set(days)
+    def records(self, channel: dict, oldest: float, threads_oldest: float | None = None) -> list[Record]:
+        days = self._render_days(channel, oldest, threads_oldest)
+        self._days[channel["id"]] = {d for d in days if d >= _day(oldest)}
         if not days:
             return []
         access = self._access(channel)
@@ -264,12 +279,15 @@ class Slack:
                 since, seen = None, set()
         synced = set()
         for ch in self.channels():
+            threads_oldest = None
             if since is not None and ch["id"] in seen:
                 oldest = _midnight(min(since, started) - LOOKBACK_DAYS * DAY)
+                if self.thread_days > LOOKBACK_DAYS:
+                    threads_oldest = _midnight(min(since, started) - self.thread_days * DAY)
             else:
                 oldest = _midnight(started - self.days * DAY)
             try:
-                recs = self.records(ch, oldest)
+                recs = self.records(ch, oldest, threads_oldest)
             except ChannelUnreadable as e:
                 log.warning("slack channel %s can't be read; skipped: %s", ch["id"], e)
                 self._unreadable.add(ch["id"])

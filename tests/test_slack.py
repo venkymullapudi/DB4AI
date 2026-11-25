@@ -48,6 +48,7 @@ class FakeSlack:
             self.replies.setdefault((cid, thread), []).append(m)
             parent = next(p for p in self.msgs[cid] if p["ts"] == thread)
             parent["thread_ts"], parent["reply_count"] = thread, parent.get("reply_count", 0) + 1
+            parent["latest_reply"] = max(parent.get("latest_reply", "0"), m["ts"], key=float)
         else:
             self.msgs[cid].append(m)
         return m["ts"]
@@ -139,7 +140,48 @@ def test_channels_sync_as_days(world):
     assert r["changed"] == 1 and r["cursor"].endswith(":ch:C1,C2")
     hist = {q.url.params["channel"]: float(q.url.params["oldest"]) for q in fake.requests
             if q.url.path.endswith("conversations.history")}
-    assert hist == {"C1": float(T("2026-11-18 00:00")), "C2": float(T("2026-10-26 00:00"))}
+    # C1 lists back to its thread horizon (30 days) but only re-renders days with a reply in its 7-day window.
+    assert hist == {"C1": float(T("2026-10-26 00:00")), "C2": float(T("2026-10-26 00:00"))}
+
+
+def test_late_replies_to_old_threads(world):
+    w = world
+    fake = FakeSlack()
+    fake.channel("C1", "general")
+    old = fake.post("C1", "2026-11-05 09:00", "UA", "old question")
+    fake.post("C1", "2026-11-05 10:00", "UB", "same day, no thread")
+    other = fake.post("C1", "2026-11-06 09:00", "UA", "old thread that stays quiet")
+    fake.post("C1", "2026-11-06 09:30", "UB", "early answer", thread=other)
+    ancient = fake.post("C1", "2026-10-01 09:00", "UA", "too old even for threads")
+    connectors.run(w.conn, w.bob, "slack", w.eng, slack(fake, days=60))
+    assert _item(w, w.alice, "C1/2026-11-05")["body"] == "[09:00] Alice: old question\n[10:00] Bob B: same day, no thread"
+
+    # Weeks later, someone answers the old thread: the parent's day is re-read whole (outside the 7-day window).
+    later = NOW + 14 * 86400
+    fake.post("C1", "2026-12-08 09:00", "UC", "late answer", thread=old)
+    fake.post("C1", "2026-12-08 09:05", "UC", "reply to an ancient parent", thread=ancient)
+    fake.requests.clear()
+    r = connectors.run(w.conn, w.bob, "slack", w.eng, slack(fake, now=later))
+    assert r["changed"] == 1 and r["deleted"] == 0
+    assert _item(w, w.alice, "C1/2026-11-05")["body"] == ("[09:00] Alice: old question\n"
+                                                         "    ↳ [09:00] Carol: late answer\n"
+                                                         "[10:00] Bob B: same day, no thread")
+    # Only the active thread's replies were read; the quiet old thread wasn't.
+    read = [q.url.params["ts"] for q in fake.requests if q.url.path.endswith("conversations.replies")]
+    assert read == [old]
+    hist = [float(q.url.params["oldest"]) for q in fake.requests if q.url.path.endswith("conversations.history")]
+    assert hist == [float(T("2026-10-26 00:00"))]  # thread horizon: 30 days before the previous sync
+    assert "ancient" not in _item(w, w.alice, "C1/2026-11-05")["body"]
+
+    # thread_days=0 keeps the old behaviour: only the 7-day window is read.
+    fake.post("C1", "2026-12-09 09:00", "UB", "another late one", thread=old)
+    fake.requests.clear()
+    r = connectors.run(w.conn, w.bob, "slack", w.eng, slack(fake, now=later + 86400, thread_days=0))
+    assert r["changed"] == 0
+    hist = [float(q.url.params["oldest"]) for q in fake.requests if q.url.path.endswith("conversations.history")]
+    assert hist == [float(T("2026-12-02 00:00"))]
+    with pytest.raises(ValueError):
+        slack(fake, thread_days=-1)
 
 
 def test_private_channels_restricted_to_members(world):

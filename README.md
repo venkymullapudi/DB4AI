@@ -74,7 +74,7 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   `db4ai sync slack --team eng` syncs the public and private channels your Slack bot (an internal app in your
   workspace, bot token in `DB4AI_SLACK_TOKEN`) has been invited to, as one `conversation` item per channel per day
   (threads under their parent message). The first sync, and each newly joined channel, backfills `--days` days
-  (default 30); later syncs re-read the last week. Private channels are restricted to their members (by actor email);
+  (default 30); later syncs re-read the last week, plus any day up to `--thread-days` (default 30) back whose thread got a new reply. Private channels are restricted to their members (by actor email);
   direct messages are never read.
   A file deleted (or trashed) in the source proposes archiving its item in the harness; nothing is archived until a
   team owner approves, and the proposal is withdrawn if the file comes back first.

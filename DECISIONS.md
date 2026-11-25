@@ -847,3 +847,23 @@ answer is the recommended one, resolved from the code and the Slack Web API.
 - **Known gap (new roadmap item):** replies to parents older than the window aren't seen.
 - **Not owner-level:** no migration, no data deleted (removals are ask_first), no paid service; the Slack app is one the
   owner creates in their own workspace when they choose to use the connector, as for Drive and Notion.
+
+## 2026-11-25 — Slack threads older than the window
+Grilled one question at a time; each answer is the recommended one, resolved from the code and the Slack Web API.
+- **Q: How do we learn that an old thread got a reply?** From `latest_reply` on parent messages in
+  `conversations.history`. The Events API needs a public endpoint (DB4AI has none for Slack), and `search.messages`
+  needs a user token. Tracking open threads in the cursor would put a growing list of message ids in it.
+- **Q: How far back?** A known channel's history is listed back `thread_days` (default 30, CLI `--thread-days`) days
+  before the previous sync; 0 (or anything ≤ the 7-day window) turns it off. Listing history is cheap (200 parents per
+  page); the costly `conversations.replies` calls are made only for days that are re-read. Unbounded would list a
+  channel's whole history every sync.
+- **Q: Which old days are re-read?** A day before the window that holds a parent with `reply_count` and
+  `latest_reply` at or after the window start. It is re-rendered whole (every thread in it), because a record is the
+  whole day; an unchanged render writes nothing. Using the window start rather than the previous sync time keeps the
+  semantics of the window: a late reply's edits are seen for 7 days, like any other message.
+- **Q: Deletions?** Unchanged: only days inside the window can be reported deleted; re-read old days are never
+  reported, so a quiet old day isn't mistaken for a deleted one.
+- **Q: Cursor?** Unchanged (`v1:ts:…:ch:…`); no migration. Newly joined channels are backfilled as before (their
+  older threads were never synced).
+- **Known limit:** a reply to a parent older than `thread_days` is still missed, as are edits to old messages.
+- **Not owner-level:** no migration, no data deleted, no new service or account.

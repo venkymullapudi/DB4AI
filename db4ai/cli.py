@@ -90,6 +90,8 @@ def main(argv: list[str] | None = None) -> None:
                          "email (default DB4AI_GDRIVE_READERS)")
     sy.add_argument("--days", type=int, default=30,
                     help="slack: days of history to backfill on the first sync and for newly joined channels")
+    sy.add_argument("--thread-days", type=int, default=30,
+                    help="slack: how far back a late thread reply re-reads its parent's day (default 30)")
 
     nr = sub.add_parser("notify-route", help="route a team's pending harness decisions to a webhook held in an env var")
     nr.add_argument("op", choices=["add", "remove", "list"])
@@ -194,7 +196,7 @@ def main(argv: list[str] | None = None) -> None:
         if a.connector == "slack":
             from .slack import Slack, SlackError
             try:
-                _out(connectors.run(conn, actor, a.source or a.connector, team_id, Slack(days=a.days)))
+                _out(connectors.run(conn, actor, a.source or a.connector, team_id, Slack(days=a.days, thread_days=a.thread_days)))
             except (SlackError, ValueError) as e:
                 sys.exit(str(e))
             return
