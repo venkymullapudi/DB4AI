@@ -69,7 +69,7 @@ right priority, with a one-line reason.
       permissions as readers"; None never changes access, so a file opened up in Drive stays restricted in DB4AI.
 - [x] **Notion connector** on the connector framework (token from env, pages as documents).
       Why: the next source named in SPEC §6.
-- [ ] **Notion databases as datasets.** Sync each database shared with the integration as a dataset (properties as
+- [x] **Notion databases as datasets.** Sync each database shared with the integration as a dataset (properties as
       columns, rows = its pages, values as text), with schema drift and deletions as for Sheets. Why: split from the
       Notion connector; v1 syncs only page bodies, so a database's table data isn't queryable.
 

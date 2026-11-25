@@ -231,13 +231,23 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   `last_edited_time`, `created_time`, `parent_type`, `parent_id`). Each sync lists pages with the search API (metadata
   only), then reads the blocks of pages edited at or after the cursor, nested blocks included (depth 8; child pages
   are their own items), rendered as Markdown-ish text. Database rows are pages and are synced as documents too.
-  Cursor = `v1:edited:<last_edited_time>` of the newest page synced; Notion rounds that to the minute, so pages at the
-  cursor time are re-sent (idempotent); a cursor without `v1:` re-lists. 429/5xx are retried (Retry-After honoured);
+  Each database shared with the integration is also a dataset (key = database id, name = its title): rows read with the
+  database query API, columns `page_id`, the title property, then the other properties by name, every value as text
+  (select/status names, multi-select and people comma-joined, dates `start → end`, formulas and rollups by their
+  result, relations as page ids), so column types are inferred as for CSV. Property changes are `alter_dataset`
+  proposals. A database is re-read when it or one of its listed rows was edited at or after the cursor, or when the set
+  of databases and rows changed (a row deleted, a database newly shared), tracked as a hash in the cursor; database
+  batches go first at the incoming cursor. One that returns 403/404 or has more than 100,000 rows is skipped and
+  logged; one no longer listed is a dataset deletion (`archive_dataset`), unless nothing at all is listed. Values of
+  relation/people/text properties with more than 25 references are as truncated by the query API.
+  Cursor = `v2:rows:<hash>:edited:<last_edited_time>` of the newest page synced; Notion rounds that to the minute, so
+  pages at the cursor time are re-sent (idempotent); a `v1:edited:` cursor keeps its time and re-reads every database
+  once; any other cursor re-lists. 429/5xx are retried (Retry-After honoured);
   a page whose blocks return 403/404, or with more than 10,000 blocks, is skipped and logged. A page archived, trashed
   or no longer shared drops out of the listing and is a deletion; an empty listing reports none (fail closed). The API
   doesn't expose page sharing, so records carry no readers (team-wide): the owner chooses what syncs by sharing pages
   with the integration.
-- More connectors (Notion databases as datasets, Miro, Slack) build on the same framework.
+- More connectors (Miro, Slack) build on the same framework.
 
 ## 7. Stack
 Python ≥3.11, FastAPI, psycopg 3 with plain SQL and a small SQL migration runner, pgvector,

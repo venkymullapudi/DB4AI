@@ -777,3 +777,40 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
 - **Q: Rate limits?** 429/5xx are retried up to 4 times, waiting `Retry-After` (capped at 60s) or exponential backoff.
 - **Not owner-level:** no migration, no data deleted, no new service or account (the owner creates an integration
   only if they want to use it).
+
+## 2026-11-25 — Notion databases as datasets
+Grilled one question at a time; each answer is the recommended one, resolved from the code and the Notion API.
+- **Q: Where do rows come from: the page search listing or the database query API?** The query API. Search already
+  returns row pages with their properties, but Notion documents search as best-effort (indexing lag), and a missed
+  row in a snapshot is a row deleted from the table. Query is authoritative; search is only used to decide *when* to
+  query.
+- **Q: When is a database re-read?** When the database itself or any of its rows (from the page listing) was edited at
+  or after the cursor, or when the set of databases and rows changed since the last sync. Deleting a row leaves no
+  edit time to see, so the cursor carries a 16-hex hash of (database ids, database/row id pairs); a different hash
+  re-reads every database. An idle sync reads no database. Re-reading every database every sync was simpler but makes
+  a batch (and a `change_log` row) per database per sync.
+- **Q: Cursor format and upgrade?** `v2:rows:<hash>:edited:<time>`. A `v1:edited:<time>` cursor keeps its time (pages
+  stay incremental) and has no hash, so every database is read once. No migration.
+- **Q: Ordering and crash safety?** Database batches go first, one database per batch, at the *incoming* cursor; the
+  page batches (or one empty batch) then move it. A crash before the move re-reads the databases (an unchanged snapshot
+  writes nothing). Putting them after the page batches would lose a row edit older than the newest page on a crash.
+- **Q: Columns?** `page_id` first (joins each row to its body item `notion:<page id>`, and keeps duplicate-looking rows
+  distinct), then the title property, then the others sorted by name (Notion's property map has no documented order,
+  and a stable order keeps drift detection honest). Names go through `snapshot_header` (a property called `page_id`
+  becomes `page_id_2`).
+- **Q: Values?** Text, so types are inferred like CSV (numbers → bigint/double, checkboxes → boolean, dates →
+  timestamptz while single dates): titles/rich text as plain text, select/status names, multi-select, people (name,
+  else email, else id), relations (page ids) and files comma-joined, dates `start → end`, formulas and rollups by their
+  result type, unique ids `PREFIX-n`. Whole-number floats render without `.0` so integer columns stay `bigint`.
+- **Q: Properties with more than 25 references?** The query API truncates relation/people/rich-text values at 25;
+  v1 takes them as returned (reading each through the property-item endpoint is one request per cell). Documented.
+- **Q: Limits and failures?** More than 100,000 rows (stop paging at the cap) or 200 properties → skipped and logged; a
+  403/404 on query → skipped, not deleted (as unreadable Sheets). 429/5xx use the existing retry.
+- **Q: Deletions?** A database no longer listed → `deleted_datasets` → `archive_dataset` (ask_first), withdrawn if it
+  comes back. Fail closed only when *nothing* (no page and no database) is listed: unsharing the last database while
+  pages remain is a real deletion.
+- **Q: Default on?** Yes. Sharing a database with the integration is already the owner's explicit choice of what
+  syncs; the README says so.
+- **Q: Dataset name?** The database title (renames later are ignored, as for Sheets); an untitled database is
+  `notion <id>`. Name collisions get the framework's hash suffix.
+- **Not owner-level:** no migration, no data deleted (removals are ask_first), no new service or account.
