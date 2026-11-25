@@ -226,7 +226,18 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   (access left as is). While on, the cursor carries `acl2:` after the types tag, so turning it on or off re-lists once
   (an older `acl:` cursor re-lists once too, so files already public get their lift proposals).
   Sheets carry no readers (datasets have no ACL).
-- More connectors (Notion, Miro, Slack) build on the same framework.
+- Built in: `notion` (`db4ai sync notion --team <t>`): every page shared with the Notion integration whose token is in
+  `DB4AI_NOTION_TOKEN` (DB4AI never stores it), as `document` items (key = page id; metadata `url`,
+  `last_edited_time`, `created_time`, `parent_type`, `parent_id`). Each sync lists pages with the search API (metadata
+  only), then reads the blocks of pages edited at or after the cursor, nested blocks included (depth 8; child pages
+  are their own items), rendered as Markdown-ish text. Database rows are pages and are synced as documents too.
+  Cursor = `v1:edited:<last_edited_time>` of the newest page synced; Notion rounds that to the minute, so pages at the
+  cursor time are re-sent (idempotent); a cursor without `v1:` re-lists. 429/5xx are retried (Retry-After honoured);
+  a page whose blocks return 403/404, or with more than 10,000 blocks, is skipped and logged. A page archived, trashed
+  or no longer shared drops out of the listing and is a deletion; an empty listing reports none (fail closed). The API
+  doesn't expose page sharing, so records carry no readers (team-wide): the owner chooses what syncs by sharing pages
+  with the integration.
+- More connectors (Notion databases as datasets, Miro, Slack) build on the same framework.
 
 ## 7. Stack
 Python ≥3.11, FastAPI, psycopg 3 with plain SQL and a small SQL migration runner, pgvector,

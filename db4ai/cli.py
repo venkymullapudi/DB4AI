@@ -76,9 +76,9 @@ def main(argv: list[str] | None = None) -> None:
     i.add_argument("--vault", action="store_true", help="treat as a Markdown/Obsidian memory vault")
 
     sy = sub.add_parser("sync", help="incremental sync from a connector")
-    sy.add_argument("connector", choices=["transcripts", "gdrive"])
+    sy.add_argument("connector", choices=["transcripts", "gdrive", "notion"])
     sy.add_argument("path", type=Path, nargs="?",
-                    help="transcripts: folder of .vtt/.srt/.txt files (gdrive reads DB4AI_GDRIVE_* from the env)")
+                    help="transcripts: folder of .vtt/.srt/.txt files (gdrive and notion read DB4AI_GDRIVE_* / DB4AI_NOTION_TOKEN from the env)")
     sy.add_argument("--team", required=True)
     sy.add_argument("--as", dest="actor", help="actor name to attribute the sync to")
     sy.add_argument("--source", help="cursor name (default: the connector name)")
@@ -180,6 +180,13 @@ def main(argv: list[str] | None = None) -> None:
                 _out(connectors.run(conn, actor, a.source or a.connector, team_id,
                                     GoogleDrive(folders=a.folders, readers=a.readers)))
             except DriveError as e:
+                sys.exit(str(e))
+            return
+        if a.connector == "notion":
+            from .notion import Notion, NotionError
+            try:
+                _out(connectors.run(conn, actor, a.source or a.connector, team_id, Notion()))
+            except NotionError as e:
                 sys.exit(str(e))
             return
         if a.path is None or not a.path.is_dir():

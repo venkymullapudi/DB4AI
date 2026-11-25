@@ -748,3 +748,32 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
   `acl2:`, so the next sync re-lists once (content is idempotent) and proposes lifts for restricted files that are
   public in Drive. An `acl:` cursor with readers turned off also re-lists once instead of erroring.
 - **Not owner-level:** no migration, no data deleted, every lift waits for an owner's approval.
+
+## 2026-11-25 — Notion connector (pages)
+Grilled one question at a time; each answer is the recommended one, resolved from the code and the Notion API.
+- **Q: Scope of this run?** Pages as documents. Databases as datasets is split into its own roadmap item: it needs
+  property → column typing and drift handling like Sheets, and is as large again.
+- **Q: Auth?** An internal integration token in `DB4AI_NOTION_TOKEN`, never stored (like `DB4AI_GDRIVE_TOKEN`). No
+  OAuth flow. Notion integrations are free; nothing is needed for the tests, which fake the API.
+- **Q: API version?** `Notion-Version: 2022-06-28`. Search with `filter: page` and block children are unchanged in
+  later versions for pages; the databases item can move to the newer data-source API if it needs it.
+- **Q: How to find changed pages?** Search has no "edited since" filter, so each sync lists every shared page
+  (metadata only, 100 per call), sorts by `(last_edited_time, id)` locally, and reads blocks only for pages at or
+  after the cursor. Cursor = `v1:edited:<time>` of the last page in each batch. Notion rounds the time to the minute,
+  so pages at the cursor time are re-sent (identical content adds no version), as the transcripts connector does. A
+  cursor without `v1:` re-lists, so a later format change re-lists once.
+- **Q: Rendering?** Markdown-ish text from each block's `plain_text`: headings, lists (nested children indented),
+  to-dos, quotes/callouts, code fences, equations, dividers, table rows, bookmark URLs, media captions. Child pages and
+  child databases show their title only: child pages are their own items. Depth 8.
+- **Q: Huge or unreadable pages?** More than 10,000 blocks → skipped and logged rather than saved half-read (a partial
+  version would look complete). A 403/404 on a page's blocks (unshared mid-sync) → skipped and logged. Like Drive's
+  skipped exports, the cursor moves past them; the next edit of the page syncs it.
+- **Q: Database rows?** They are pages, so their bodies sync as documents (metadata `parent_type: database_id`,
+  `parent_id`). Their properties become dataset rows in the databases item; nothing is lost meanwhile.
+- **Q: Deletions?** Archived, trashed and unshared pages drop out of search: `deleted(known)` = known − listed, using
+  the same listing as `fetch`. An empty listing reports nothing (fail closed). Every deletion is an ask_first archive.
+- **Q: Readers?** The public API doesn't expose who a page is shared with, so records send no readers: pages are
+  team-wide, and the owner chooses what syncs by sharing pages with the integration. Documented in README.
+- **Q: Rate limits?** 429/5xx are retried up to 4 times, waiting `Retry-After` (capped at 60s) or exponential backoff.
+- **Not owner-level:** no migration, no data deleted, no new service or account (the owner creates an integration
+  only if they want to use it).

@@ -67,8 +67,11 @@ right priority, with a one-line reason.
 - [x] **Lift a synced restriction when the source goes public.** A record needs an explicit "public" signal (e.g. a
       Drive file shared with anyone or the domain) that proposes lifting the item's ACL. Why: split from "Drive
       permissions as readers"; None never changes access, so a file opened up in Drive stays restricted in DB4AI.
-- [ ] **Notion connector** on the connector framework (token from env, pages as documents, databases as datasets).
+- [x] **Notion connector** on the connector framework (token from env, pages as documents).
       Why: the next source named in SPEC §6.
+- [ ] **Notion databases as datasets.** Sync each database shared with the integration as a dataset (properties as
+      columns, rows = its pages, values as text), with schema drift and deletions as for Sheets. Why: split from the
+      Notion connector; v1 syncs only page bodies, so a database's table data isn't queryable.
 
 ## Later
 
