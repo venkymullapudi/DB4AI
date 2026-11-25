@@ -76,6 +76,10 @@ analytics tables** side by side, keeps itself tidy with AI maintainers, and asks
   (threads under their parent message). The first sync, and each newly joined channel, backfills `--days` days
   (default 30); later syncs re-read the last week, plus any day up to `--thread-days` (default 30) back whose thread got a new reply. Private channels are restricted to their members (by actor email);
   direct messages are never read.
+  `db4ai sync miro --team eng [--miro-team <id>]` syncs the Miro boards your Miro app's token (`DB4AI_MIRO_TOKEN`,
+  scope `boards:read`) can open as `whiteboard` items (sticky notes, cards, text and shapes, grouped by frame),
+  re-reading only boards modified since the last sync. Boards private to their members are never synced (Miro's API
+  doesn't give member emails to restrict them by), and synced boards are team-wide.
   A file deleted (or trashed) in the source proposes archiving its item in the harness; nothing is archived until a
   team owner approves, and the proposal is withdrawn if the file comes back first.
   A batch can also carry `datasets` (`key`, `name`, `columns`, `rows`: a full snapshot of one table, e.g. a sheet tab)
@@ -168,6 +172,8 @@ db4ai eval --llm claude --min-precision 0.9
 | `DB4AI_GDRIVE_TOKEN` | — | Google Drive OAuth access token (scope `drive.readonly`) for `db4ai sync gdrive` |
 | `DB4AI_NOTION_TOKEN` | — | Notion internal integration token for `db4ai sync notion` (syncs the pages and databases shared with the integration) |
 | `DB4AI_SLACK_TOKEN` | — | Slack bot token (`xoxb-…`, scopes `channels:read`, `groups:read`, `channels:history`, `groups:history`, `users:read`, `users:read.email`) for `db4ai sync slack` |
+| `DB4AI_MIRO_TOKEN` | — | Miro app access token (scope `boards:read`) for `db4ai sync miro` |
+| `DB4AI_MIRO_TEAM` | — | Miro team id to limit `db4ai sync miro` to (default: every board the token can open) |
 | `DB4AI_GDRIVE_READERS` | off | `1` = restrict synced Drive files to the team members they are shared with (matched by actor email) |
 | `DB4AI_GDRIVE_FOLDERS` | — | comma-separated Drive folder / shared drive ids to limit `db4ai sync gdrive` to (default: everything the token can read) |
 | `DB4AI_GDRIVE_REFRESH_TOKEN`, `DB4AI_GDRIVE_CLIENT_ID`, `DB4AI_GDRIVE_CLIENT_SECRET` | — | instead of (or with) the access token: refresh it when it expires |
@@ -176,5 +182,4 @@ db4ai eval --llm claude --min-precision 0.9
 
 ## Not in v1
 
-Connectors for Miro and Slack (they will build on `POST /sync/{source}`), and bitemporal
-"as of" queries.
+Bitemporal queries (when a fact was true in the world, as opposed to when DB4AI recorded it).

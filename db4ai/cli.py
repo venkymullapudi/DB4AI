@@ -76,9 +76,9 @@ def main(argv: list[str] | None = None) -> None:
     i.add_argument("--vault", action="store_true", help="treat as a Markdown/Obsidian memory vault")
 
     sy = sub.add_parser("sync", help="incremental sync from a connector")
-    sy.add_argument("connector", choices=["transcripts", "gdrive", "notion", "slack"])
+    sy.add_argument("connector", choices=["transcripts", "gdrive", "notion", "slack", "miro"])
     sy.add_argument("path", type=Path, nargs="?",
-                    help="transcripts: folder of .vtt/.srt/.txt files (gdrive, notion and slack read DB4AI_GDRIVE_* / DB4AI_NOTION_TOKEN / DB4AI_SLACK_TOKEN from the env)")
+                    help="transcripts: folder of .vtt/.srt/.txt files (gdrive, notion, slack and miro read DB4AI_GDRIVE_* / DB4AI_NOTION_TOKEN / DB4AI_SLACK_TOKEN / DB4AI_MIRO_TOKEN from the env)")
     sy.add_argument("--team", required=True)
     sy.add_argument("--as", dest="actor", help="actor name to attribute the sync to")
     sy.add_argument("--source", help="cursor name (default: the connector name)")
@@ -92,6 +92,7 @@ def main(argv: list[str] | None = None) -> None:
                     help="slack: days of history to backfill on the first sync and for newly joined channels")
     sy.add_argument("--thread-days", type=int, default=30,
                     help="slack: how far back a late thread reply re-reads its parent's day (default 30)")
+    sy.add_argument("--miro-team", help="miro: sync only boards in this Miro team id (default DB4AI_MIRO_TEAM, else all)")
 
     nr = sub.add_parser("notify-route", help="route a team's pending harness decisions to a webhook held in an env var")
     nr.add_argument("op", choices=["add", "remove", "list"])
@@ -198,6 +199,13 @@ def main(argv: list[str] | None = None) -> None:
             try:
                 _out(connectors.run(conn, actor, a.source or a.connector, team_id, Slack(days=a.days, thread_days=a.thread_days)))
             except (SlackError, ValueError) as e:
+                sys.exit(str(e))
+            return
+        if a.connector == "miro":
+            from .miro import Miro, MiroError
+            try:
+                _out(connectors.run(conn, actor, a.source or a.connector, team_id, Miro(team=a.miro_team)))
+            except MiroError as e:
                 sys.exit(str(e))
             return
         if a.path is None or not a.path.is_dir():

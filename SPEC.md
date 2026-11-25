@@ -265,7 +265,21 @@ Tiers come from the `policies` table (per team, with a global default). The AI n
   channel whose history returns `not_in_channel`/`channel_not_found`/`missing_scope` is skipped and reports none, and no
   channels at all reports nothing. 429 and `ratelimited` are retried (Retry-After honoured); `invalid_auth` and other
   errors stop the sync.
-- More connectors (Miro) build on the same framework.
+- Built in: `miro` (`db4ai sync miro --team <t> [--miro-team <id>]`): the Miro boards the access token in
+  `DB4AI_MIRO_TOKEN` (scope `boards:read`; DB4AI never stores it) can open, optionally only those of one Miro team
+  (`--miro-team` / `DB4AI_MIRO_TEAM`), as `whiteboard` items (key = board id, title = board name; metadata `view_link`,
+  `modified_at`, `created_at`, `team_id`). Body, from the REST v2 items endpoint: the board description, the items
+  outside any frame, then one `## <frame title>` section per frame with the items placed in it; frames and items in
+  reading order (top to bottom, then left to right). Sticky notes and cards (`title: description`) are `- ` bullets,
+  text and shapes plain lines (rich text as plain text), images/documents as `[image: title]`, embeds as `<url>`;
+  connector lines are not rendered. Access fails closed: the API lists board members by name only, so readers can't be
+  matched to actors; a board whose sharing policy (`access`, `teamAccess`, `organizationAccess`) is all `private` (or
+  missing) is never synced, and the others are team-wide (records carry no readers). Cursor =
+  `v1:scope:<hash of the Miro team id>:modified:<modifiedAt>` of the newest board synced; boards modified at or after
+  it are re-read (those at the cursor time re-sent, idempotent); a cursor from another scope re-lists. A synced board
+  no longer listed or now private is a deletion; a board whose items return 403/404 or with more than 10,000 items is
+  skipped and logged (not a deletion); an empty listing reports none. 429/5xx are retried (Retry-After honoured).
+- More connectors build on the same framework.
 
 ## 7. Stack
 Python ≥3.11, FastAPI, psycopg 3 with plain SQL and a small SQL migration runner, pgvector,

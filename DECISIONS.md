@@ -867,3 +867,29 @@ Grilled one question at a time; each answer is the recommended one, resolved fro
   older threads were never synced).
 - **Known limit:** a reply to a parent older than `thread_days` is still missed, as are edits to old messages.
 - **Not owner-level:** no migration, no data deleted, no new service or account.
+
+## 2026-11-25 — Miro connector
+The roadmap was fully ticked, so this run added the last source SPEC §6 names ("More connectors (Miro)"). Grilled one
+question at a time; each answer is the recommended one, resolved from the code and Miro's REST API v2.
+- **Q: What is one item?** One board, as a `whiteboard` item (the type already exists). One item per sticky note
+  floods search with fragments; a board is the unit people name and share.
+- **Q: How is a board rendered?** Description, loose items, then a `## <frame title>` section per frame, each in
+  reading order (y then x). Frames are how people group a board, so they become headings. Sticky notes and cards are
+  bullets, text/shapes plain lines, images/documents by title, embeds by URL. Connector lines (arrows) are skipped in v1:
+  their meaning is spatial and their captions are rare.
+- **Q: How does a sync find changes?** Board `modifiedAt` from the board listing, like Notion's `last_edited_time`:
+  boards modified at or after the cursor are re-read whole and re-sent (unchanged boards add no version). Re-reading
+  every board's items every sync would cost one items listing (50 per page) per board.
+- **Q: Access?** Fail closed. Miro's board members endpoint gives names and roles, not emails, so readers can't be
+  matched to actors. A board whose sharing policy keeps it to its members (`access`, `teamAccess`,
+  `organizationAccess` all `private`, or no policy returned) is never synced; the rest are team-wide with no readers
+  (not `public`, so a board an admin restricted by hand isn't re-proposed for lifting every sync).
+- **Q: Scope?** Optional Miro team id (`--miro-team` / `DB4AI_MIRO_TEAM`, the listing's `team_id` filter); its hash is
+  in the cursor so changing it re-lists.
+- **Q: Deletions?** A synced board no longer listed, or now private, proposes `archive_item` (ask_first). A board whose
+  items can't be read (403/404) or is over 10,000 items is skipped and not reported; an empty listing reports nothing.
+- **Known limits:** a sharing change that doesn't bump `modifiedAt` is only seen at the board's next edit (a board
+  made private is still caught by `deleted`, which reads every board's policy each run); comments and connector lines
+  aren't synced.
+- **Not owner-level:** no migration, no data deleted (removals are ask_first), no paid service; the Miro app is one the
+  owner creates in their own Miro team when they choose to use the connector, as for Drive, Notion and Slack.

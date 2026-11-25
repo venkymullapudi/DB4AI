@@ -78,6 +78,8 @@ right priority, with a one-line reason.
 - [x] **Slack threads older than the window.** A reply to a parent older than the 7-day re-read window is never seen;
       use each message's `latest_reply` (or the Events API) to re-render old days with new thread activity. Why: found
       while building the Slack connector.
+- [x] **Miro connector** on the connector framework (access token from env, boards as `whiteboard` items, private
+      boards never synced). Why: the last source SPEC §6 names, once the roadmap was empty.
 
 ## Later
 
